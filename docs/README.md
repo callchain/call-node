@@ -2,15 +2,20 @@
 
 This directory contains the complete documentation for the Callchain node.
 
-## Getting Started
+---
 
-New to Callchain? Start here:
+## Overview
 
 | Document | What you'll learn |
 |----------|-----------------|
 | [`spec.md`](spec.md) | Complete protocol specification, architecture, and design principles |
-| [`how-to.md`](how-to.md) | Developer workflow and node operator deployment guide |
 | [`CALL.md`](CALL.md) | The CALL token and native asset design |
+
+## How To Use
+
+| Document | What you'll learn |
+|----------|-----------------|
+| [`how-to.md`](how-to.md) | Developer workflow (build, test, contribute) and node operator deployment guide |
 
 ## Architecture & Design
 
@@ -26,10 +31,11 @@ New to Callchain? Start here:
 | [`transaction.md`](transaction.md) | Transaction formats, serialization, lifecycle |
 | [`reth.md`](reth.md) | Reth integration and compatibility notes |
 
-## Subsystems
+## Subsystems & Precompiles
 
 | Document | Description |
 |----------|-------------|
+| [`precompile.md`](precompile.md) | All EVM precompiles (`0x101`–`0x209`) |
 | [`bridge.md`](bridge.md) | Cross-chain bridge: deposits, challenges, signature thresholds |
 | [`shielded.md`](shielded.md) | Halo2 ZK circuits, shielded transaction precompile (`0x202`) |
 | [`agent.md`](agent.md) | AI agent framework: registration, delegation, batch payments (`0x209`) |
@@ -37,15 +43,8 @@ New to Callchain? Start here:
 | [`light-client.md`](light-client.md) | Ethereum beacon chain light client verification |
 | [`oracle.md`](oracle.md) | Price feed oracle with P2P aggregation |
 | [`compliance.md`](compliance.md) | Compliance engine, sanctions list, issuer policies |
-| [`precompile.md`](precompile.md) | All EVM precompiles (`0x101`–`0x209`) |
 | [`switch.md`](switch.md) | Internal bridge (escrow vs mint-burn per asset) |
-
-### Assets & Issuance
-
-| Document | Description |
-|----------|-------------|
 | [`asset.md`](asset.md) | Asset registration, open issuance, metadata |
-| [`CALL.md`](CALL.md) | Native CALL token design |
 
 ## RPC & APIs
 
@@ -88,13 +87,9 @@ New to Callchain? Start here:
 | [`vitalik-zk-payment.md`](vitalik-zk-payment.md) | Vitalik's ZK payment design analysis |
 | [`seismic.md`](seismic.md) | Seismic / encrypted memory research |
 | [`upgrade.md`](upgrade.md) | Protocol upgrade mechanism |
-
-## Production Readiness
-
-| Document | Description |
-|----------|-------------|
 | [`unready.md`](unready.md) | Remaining blockers before mainnet / testnet launch |
 | [`genesis.md`](genesis.md) | Genesis configuration requirements and creation guide |
+| [`rfcs/threshold-signing.md`](rfcs/threshold-signing.md) | Threshold signature scheme for validators (RFC) |
 
 ## Runbooks
 
@@ -105,14 +100,6 @@ Operational procedures for incident response:
 | [`runbooks/chain-halt.md`](runbooks/chain-halt.md) | Consensus stop diagnosis and recovery |
 | [`runbooks/state-corruption.md`](runbooks/state-corruption.md) | Database corruption recovery |
 | [`runbooks/mass-offline.md`](runbooks/mass-offline.md) | Mass validator offline response |
-
-## RFCs
-
-Proposals and design discussions:
-
-| Document | Topic |
-|----------|-------|
-| [`rfcs/threshold-signing.md`](rfcs/threshold-signing.md) | Threshold signature scheme for validators |
 
 ---
 
