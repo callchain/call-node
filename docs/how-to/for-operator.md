@@ -54,6 +54,27 @@ docker run -d \
   --config /config/config.toml
 ```
 
+## Genesis File
+
+Every node needs a genesis file to initialize the chain state on first boot.
+
+```bash
+# For devnet / local testing
+cp example/genesis.example.json /etc/callchain/genesis.json
+
+# For testnet / mainnet — download from the official release
+# curl -o /etc/callchain/genesis.json https://releases.callchain.org/testnet/genesis.json
+```
+
+The genesis file defines:
+- Chain ID and name
+- Initial validators and their stakes
+- Initial asset registry (including CALL token)
+- Initial balances
+- Consensus parameters
+
+See [`docs/genesis.md`](../genesis.md) for the full JSON format specification.
+
 ## Configuration
 
 ### Validator Node Configuration
@@ -191,6 +212,7 @@ Group=callchain
 ExecStart=/usr/local/bin/calld --config /etc/callchain/config.toml
 Restart=always
 RestartSec=10
+LimitNOFILE=65536
 Environment="RUST_LOG=info,callchain=debug"
 Environment="CALL_KEYSTORE_PASS_FILE=/etc/callchain/keystore.pass"
 
@@ -394,6 +416,32 @@ curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
 | "Rate limit exceeded" | Legitimate traffic blocked | Increase `--rate-limit-rps` or whitelist IPs |
 | "TLS handshake failed" | Certificate issue | Check cert/key paths, expiry, format |
 | High memory usage | Archive mode or large state | Enable pruning (remove `--archive`) |
+
+## Log Rotation
+
+Create `/etc/logrotate.d/callchain`:
+
+```bash
+/var/log/callchain/*.log {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 callchain callchain
+    sharedscripts
+    postrotate
+        systemctl reload callchaind || true
+    endscript
+}
+```
+
+Enable:
+```bash
+sudo logrotate -d /etc/logrotate.d/callchain  # dry run
+sudo systemctl restart logrotate
+```
 
 ## Firewall Rules
 

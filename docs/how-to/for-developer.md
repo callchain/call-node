@@ -54,6 +54,18 @@ cargo fmt --all -- --check
 cargo audit
 ```
 
+## Genesis Setup
+
+Before starting a node, you need a genesis file to initialize chain state.
+
+```bash
+# Use the built-in example (devnet/testnet)
+cp example/genesis.example.json ~/.callchain/genesis.json
+
+# Or create your own following docs/genesis.md
+# The genesis file defines initial validators, balances, assets, and consensus params
+```
+
 ## Local Devnet (Single Node)
 
 ```bash
@@ -63,6 +75,7 @@ calld wallet generate-keys
 
 # Run a solo validator (no BFT consensus needed for local dev)
 calld --validator --validator-key <SECRET_KEY_HEX> --solo \
+  --genesis-path ~/.callchain/genesis.json \
   --http-addr 127.0.0.1:8545 \
   --ws-addr 127.0.0.1:8546 \
   --metrics-addr 127.0.0.1:9090 \
@@ -77,24 +90,37 @@ The node will:
 
 ## Local Devnet (Multi-Node)
 
-For a 4-node BFT network on localhost:
+For a 4-node BFT network on localhost, each node needs a distinct **P2P identity key**. The peer_id is the hex-encoded public key (64 hex chars) derived from the identity key.
 
 ```bash
+# Generate identity keys for each node
+calld wallet generate-keys  # Node 1 — save secret key and public key (peer_id)
+calld wallet generate-keys  # Node 2
+calld wallet generate-keys  # Node 3
+calld wallet generate-keys  # Node 4
+
 # Node 1 (bootstrap)
-calld --validator --validator-key <KEY1> \
+calld --validator --validator-key <KEY1> --identity-key <ID_SECRET_1> \
   --p2p-listen-addr 127.0.0.1:51235 \
   --http-addr 127.0.0.1:8545 \
-  --data-dir ~/.callchain/node1
+  --data-dir ~/.callchain/node1 \
+  --genesis-path ~/.callchain/genesis.json
 
-# Node 2
-calld --validator --validator-key <KEY2> \
+# Check Node 1 logs for its peer_id (hex public key, 64 chars):
+# grep "peer_id" ~/.callchain/node1/logs/callchain.log
+
+# Node 2 — use Node 1's peer_id as bootstrap
+calld --validator --validator-key <KEY2> --identity-key <ID_SECRET_2> \
   --p2p-listen-addr 127.0.0.1:51236 \
-  --p2p-bootstrap-peers <PEER1_ID>@127.0.0.1:51235 \
+  --p2p-bootstrap-peers <PEER1_ID_HEX>@127.0.0.1:51235 \
   --http-addr 127.0.0.1:8546 \
-  --data-dir ~/.callchain/node2
+  --data-dir ~/.callchain/node2 \
+  --genesis-path ~/.callchain/genesis.json
 
-# Node 3 & 4 follow same pattern
+# Node 3 & 4 follow the same pattern
 ```
+
+**Tip:** If you omit `--identity-key`, the node generates one automatically and logs the peer_id on startup. Look for `peer_id` in the startup logs.
 
 ## Wallet Operations
 

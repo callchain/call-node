@@ -31,6 +31,15 @@ Runs automatically as a `LightClientService` tokio task within every Callchain n
 
 **Validator set refresh:** Automatically re-reads validator count, addresses, pubkeys, and BLS pubkeys from EVM state at epoch boundaries.
 
+**Monitoring:**
+```bash
+# Check verified header count via logs
+grep "light_client" /var/log/callchain/node.log
+
+# Prometheus metric (if exposed)
+light_client_verified_headers_total
+```
+
 ---
 
 ## Ethereum Light Client
@@ -44,14 +53,20 @@ Add to `/etc/callchain/config.toml`:
 ```toml
 [light_client]
 beacon_url = "https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY"
-checkpoint_file = "/etc/callchain/checkpoint.json"
+genesis_validators_root = "0x..."  # 32-byte hex
+fork_version = "0x00000001"         # Altair fork version hex
+# checkpoint_file = "/etc/callchain/checkpoint.json"
 ```
 
 **Beacon URL:** Ethereum consensus layer REST API (Alchemy, Infura, or self-hosted beacon node).
 
-**Checkpoint file:** JSON with trusted sync committee pubkeys for initial anchor.
+**Genesis validators root:** Required when `beacon_url` is set. This is the genesis validators root of the Ethereum beacon chain, a 32-byte value that can be obtained from the beacon chain genesis or a trusted source.
 
-### Checkpoint File Format
+**Fork version:** Beacon chain fork version in hex. Default is `0x00000001` for Altair.
+
+### Checkpoint File
+
+The checkpoint file is optional. It provides a trusted anchor for the light client to start verification from:
 
 ```json
 {
@@ -64,158 +79,49 @@ checkpoint_file = "/etc/callchain/checkpoint.json"
 }
 ```
 
-### Building a Checkpoint
+**How to obtain a checkpoint:**
+1. Query a trusted Ethereum beacon node:
+   ```bash
+   curl "https://beacon.example.com/eth/v1/beacon/headers/21000000" | jq '.data.root'
+   ```
+2. Get sync committee pubkeys from the same node for the period containing your anchor block
+3. Manually construct the JSON file and save to `/etc/callchain/checkpoint.json`
 
-```bash
-# Fetch from a trusted Ethereum node
-eth_checkpoint --output /etc/callchain/checkpoint.json --block 21000000
+> **Note:** There is currently no automated checkpoint generation tool. The checkpoint must be built manually or obtained from a trusted source.
 
-# Or manually construct from known-good state
-```
+### Build Requirements
 
-### Enabling Light Client Bridge Deposits
-
-Build with `light-client-bridge` feature:
+Build with `light-client-bridge` feature to enable the light client bridge deposit path:
 
 ```bash
 cargo build --release --features light-client-bridge
 ```
 
-### Submitting Headers
+### Light Client Bridge Deposits
 
-**Manually via RPC:**
+The `call_lightClientBridgeDeposit` RPC method is currently **disabled** in the RPC server. Direct EVM writes from external RPC callers are not permitted for security reasons. Bridge deposits via the light client path must go through the standard validator multi-sig flow or be submitted by an authorized internal service.
 
-```bash
-curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "call_lightClientSubmitHeader",
-    "params": ["0x...header_rlp..."],
-    "id": 1
-  }'
-```
+If you need light client bridge deposits in production, the recommended approach is:
+1. Run a dedicated bridge relayer service that has internal access to the node
+2. The relayer fetches Ethereum headers, tx proofs, and receipt proofs
+3. The relayer submits deposits through the internal API or directly via the EVM precompile
 
-**Automatic sync (feature `eth-sync`):**
+### Monitoring
 
-```bash
-# Sync a range of headers
-# Configured via beacon_url in config.toml
-# Service fetches headers automatically and submits them
-```
+| Check | How to verify |
+|-------|---------------|
+| Verified headers count | Check logs for `light_client` entries |
+| Latest verified block | Internal metric, check node logs |
+| Beacon API health | `curl -s -o /dev/null -w "%{http_code}" https://beacon.example.com/eth/v1/node/health` |
+| Reorg events | Log search: `grep "reorg" /var/log/callchain/node.log` |
 
-### Verifying Transaction Inclusion
-
-```bash
-curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "call_lightClientVerifyTx",
-    "params": [
-      21000001,
-      "0x...tx_hash...",
-      ["0x...proof_node1...", "0x...proof_node2..."]
-    ],
-    "id": 1
-  }'
-```
-
-### Verifying Receipt and Bridge Event
-
-```bash
-curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "call_lightClientVerifyReceipt",
-    "params": [
-      21000001,
-      5,
-      ["0x...receipt_proof_node1...", "0x...receipt_proof_node2..."]
-    ],
-    "id": 1
-  }'
-```
-
-Parameters:
-- `block_number`: Verified Ethereum block number
-- `receipt_index`: Transaction index within the block
-- `proof`: MPT proof nodes against `receipts_root`
-
-### Full Bridge Deposit via Light Client
-
-```bash
-curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "call_lightClientBridgeDeposit",
-    "params": [
-      "0x...header_rlp...",
-      "0x...tx_proof...",
-      "0x...receipt_proof..."
-    ],
-    "id": 1
-  }'
-```
-
-This single RPC:
-1. Submits and verifies the Ethereum header
-2. Verifies tx inclusion via MPT proof
-3. Verifies receipt via MPT proof
-4. Parses bridge deposit event from receipt logs
-5. Queues deposit for challenge period
-
----
-
-## Reorg Handling
-
-**Protocol light client:**
-- `handle_reorg()` removes verified headers at or above fork height
-- Orphaned headers purged from memory and MDBX
-- New canonical chain re-verified
-
-**Ethereum light client:**
-- Parent hash mismatch triggers reorg handling
-- Walks back to find fork point
-- Unwinds orphaned headers
-- Re-orgs below finalized block are rejected
-
----
-
-## Anchor Advancement
-
-Prune old headers to free memory:
-
-```bash
-# Advance anchor to a more recent block
-# Automatically prunes all headers below the new anchor
-curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "call_lightClientAdvanceAnchor",
-    "params": [21005000],
-    "id": 1
-  }'
-```
-
----
-
-## Monitoring
-
-| Check | Command / Metric |
-|-------|-----------------|
-| Verified headers count | `call_lightClientHeaderCount` |
-| Latest verified block | `call_lightClientLatestBlock` |
-| Gap buffer size | Internal metric (logged) |
-| Reorg events | `light_client_reorg_total` metric |
-| Beacon API health | Check `beacon_url` response time |
-
----
-
-## Troubleshooting
+### Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| "Header parent not found" | Out-of-order headers | Wait for missing parent, or sync range |
-| "MPT proof verification failed" | Wrong proof or corrupted data | Verify proof against correct root |
-| "Beacon API timeout" | Network or API issue | Check beacon_url connectivity |
-| "Checkpoint too old" | Anchor far behind current chain | Advance anchor or rebuild checkpoint |
-| "Reorg below finalized" | Deep reorg on Ethereum | Reject — this is expected behavior |
+| "Header parent not found" | Out-of-order headers | Wait for missing parent, or sync a range of headers |
+| "MPT proof verification failed" | Wrong proof or corrupted data | Verify proof against correct root hash |
+| "Beacon API timeout" | Network or API issue | Check `beacon_url` connectivity and rate limits |
+| "Checkpoint too old" | Anchor far behind current chain | Rebuild checkpoint from a more recent block |
+| "Reorg below finalized" | Deep reorg on Ethereum | Expected behavior — re-orgs below finalized block are rejected |
+| "Genesis validators root required" | Missing `genesis_validators_root` in config | Add the 32-byte genesis validators root to `[light_client]` |
