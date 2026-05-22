@@ -1,5 +1,7 @@
 # Callchain Ethereum JSON-RPC 兼容性审计
 
+> **API Stability**: All `eth_*` methods are **Stable** — they implement the Ethereum JSON-RPC specification. Response formats and semantics are backward-compatible within a major version. Callchain-specific deviations (e.g., PoS constants, no uncle blocks) are explicitly noted below.
+
 **Scope**: 所有 `eth_*` 方法 — 功能完整性审计与实现细节
 **Files**: `crates/rpc/src/standard.rs`, `crates/rpc/src/handlers/state.rs`, `crates/rpc/src/ws.rs`
 **Last Updated**: 2026-05-10
@@ -8,55 +10,55 @@
 
 ## 零、完整接口清单（47 个）
 
-| # | 方法 | 说明 |
-|---|---|---|
-| 1 | `eth_protocolVersion` | 返回固定值 `"1"` |
-| 2 | `eth_syncing` | 支持真实同步进度（`SyncProgress`） |
-| 3 | `eth_coinbase` | 从 EVM validator 存储读取当前 proposer 地址 |
-| 4 | `eth_chainId` | |
-| 5 | `eth_mining` | PoS 链，返回 `false` |
-| 6 | `eth_hashrate` | PoS 链，返回 `"0x0"` |
-| 7 | `eth_gasPrice` | 返回 `base_fee + MIN_PRIORITY_FEE_PER_GAS` |
-| 8 | `eth_maxPriorityFeePerGas` | 返回 `MIN_PRIORITY_FEE_PER_GAS`（1 wei） |
-| 9 | `eth_feeHistory` | 读 `fee_history` ring buffer（最大 1024 条） |
-| 10 | `eth_accounts` | 返回本地 keystore 中的地址列表 |
-| 11 | `eth_getBalance` | 支持 blockTag（历史状态通过 `AccountHistory` 表） |
-| 12 | `eth_getStorageAt` | 支持 blockTag（历史状态通过 `StorageHistory` 表） |
-| 13 | `eth_getTransactionCount` | 支持 blockTag；`"pending"` 合并 mempool nonce |
-| 14 | `eth_getCode` | 支持 blockTag（历史状态通过 `AccountHistory` 表） |
-| 15 | `eth_sign` | personal_sign 格式，需账户在 keystore |
-| 16 | `eth_signTransaction` | 构建、签名并返回 raw tx hex |
-| 17 | `eth_sendTransaction` | 构建、签名并通过 mempool 提交 |
-| 18 | `eth_sendRawTransaction` | |
-| 19 | `eth_call` | 支持 blockTag（当前 state 或 block snapshot） |
-| 20 | `eth_estimateGas` | 支持 blockTag（当前 state 或 block snapshot） |
-| 21 | `eth_createAccessList` | 通过 `revm-inspectors` AccessListInspector 生成 |
-| 22 | `eth_getBlockByHash` | 通过 `block_hash_index` 查 height |
-| 23 | `eth_getBlockByNumber` | 含 transactions/gasUsed/size |
-| 24 | `eth_getBlockTransactionCountByHash` | |
-| 25 | `eth_getBlockTransactionCountByNumber` | |
-| 26 | `eth_getUncleCountByBlockHash` | PoS 无 uncle，返回 `"0x0"` |
-| 27 | `eth_getUncleCountByBlockNumber` | PoS 无 uncle，返回 `"0x0"` |
-| 28 | `eth_getUncleByBlockHashAndIndex` | PoS 无 uncle，返回 `null` |
-| 29 | `eth_getUncleByBlockNumberAndIndex` | PoS 无 uncle，返回 `null` |
-| 30 | `eth_getTransactionByHash` | EVM tx 完整字段；receipt fallback 9 个字段 |
-| 31 | `eth_getTransactionByBlockHashAndIndex` | |
-| 32 | `eth_getTransactionByBlockNumberAndIndex` | |
-| 33 | `eth_getTransactionReceipt` | 含 blockHash/txIndex/to/contractAddress/logsBloom |
-| 34 | `eth_getBlockReceipts` | |
-| 35 | `eth_getLogs` | 含 fromBlock/toBlock/topics/blockHash/txIndex/logIndex |
-| 36 | `eth_newFilter` | |
-| 37 | `eth_newBlockFilter` | |
-| 38 | `eth_newPendingTransactionFilter` | |
-| 39 | `eth_uninstallFilter` | |
-| 40 | `eth_getFilterChanges` | 支持 Log/Block/PendingTransaction 三种 filter |
-| 41 | `eth_getFilterLogs` | |
-| 42 | `eth_getWork` | PoW only，返回 unsupported |
-| 43 | `eth_submitWork` | PoW only，返回 unsupported |
-| 44 | `eth_submitHashrate` | PoW only，返回 unsupported |
-| 45 | `eth_getProof` | 真正 Merkle proof（`reth-trie` 持久化 trie 节点） |
-| 46 | `eth_subscribe` | WebSocket，支持 newHeads/logs/newPendingTransactions |
-| 47 | `eth_unsubscribe` | WebSocket |
+| # | 方法 | 稳定性 | 说明 |
+|---|---|---|---|
+| 1 | `eth_protocolVersion` | **Stable** | 返回固定值 `"1"` |
+| 2 | `eth_syncing` | **Stable** | 支持真实同步进度（`SyncProgress`） |
+| 3 | `eth_coinbase` | **Stable** | 从 EVM validator 存储读取当前 proposer 地址 |
+| 4 | `eth_chainId` | **Stable** | |
+| 5 | `eth_mining` | **Stable** | PoS 链，返回 `false` |
+| 6 | `eth_hashrate` | **Stable** | PoS 链，返回 `"0x0"` |
+| 7 | `eth_gasPrice` | **Stable** | 返回 `base_fee + MIN_PRIORITY_FEE_PER_GAS` |
+| 8 | `eth_maxPriorityFeePerGas` | **Stable** | 返回 `MIN_PRIORITY_FEE_PER_GAS`（1 wei） |
+| 9 | `eth_feeHistory` | **Stable** | 读 `fee_history` ring buffer（最大 1024 条） |
+| 10 | `eth_accounts` | **Stable** | 返回本地 keystore 中的地址列表 |
+| 11 | `eth_getBalance` | **Stable** | 支持 blockTag（历史状态通过 `AccountHistory` 表） |
+| 12 | `eth_getStorageAt` | **Stable** | 支持 blockTag（历史状态通过 `StorageHistory` 表） |
+| 13 | `eth_getTransactionCount` | **Stable** | 支持 blockTag；`"pending"` 合并 mempool nonce |
+| 14 | `eth_getCode` | **Stable** | 支持 blockTag（历史状态通过 `AccountHistory` 表） |
+| 15 | `eth_sign` | **Stable** | personal_sign 格式，需账户在 keystore |
+| 16 | `eth_signTransaction` | **Stable** | 构建、签名并返回 raw tx hex |
+| 17 | `eth_sendTransaction` | **Stable** | 构建、签名并通过 mempool 提交 |
+| 18 | `eth_sendRawTransaction` | **Stable** | |
+| 19 | `eth_call` | **Stable** | 支持 blockTag（当前 state 或 block snapshot） |
+| 20 | `eth_estimateGas` | **Stable** | 支持 blockTag（当前 state 或 block snapshot） |
+| 21 | `eth_createAccessList` | **Stable** | 通过 `revm-inspectors` AccessListInspector 生成 |
+| 22 | `eth_getBlockByHash` | **Stable** | 通过 `block_hash_index` 查 height |
+| 23 | `eth_getBlockByNumber` | **Stable** | 含 transactions/gasUsed/size |
+| 24 | `eth_getBlockTransactionCountByHash` | **Stable** | |
+| 25 | `eth_getBlockTransactionCountByNumber` | **Stable** | |
+| 26 | `eth_getUncleCountByBlockHash` | **Stable** | PoS 无 uncle，返回 `"0x0"` |
+| 27 | `eth_getUncleCountByBlockNumber` | **Stable** | PoS 无 uncle，返回 `"0x0"` |
+| 28 | `eth_getUncleByBlockHashAndIndex` | **Stable** | PoS 无 uncle，返回 `null` |
+| 29 | `eth_getUncleByBlockNumberAndIndex` | **Stable** | PoS 无 uncle，返回 `null` |
+| 30 | `eth_getTransactionByHash` | **Stable** | EVM tx 完整字段；receipt fallback 9 个字段 |
+| 31 | `eth_getTransactionByBlockHashAndIndex` | **Stable** | |
+| 32 | `eth_getTransactionByBlockNumberAndIndex` | **Stable** | |
+| 33 | `eth_getTransactionReceipt` | **Stable** | 含 blockHash/txIndex/to/contractAddress/logsBloom |
+| 34 | `eth_getBlockReceipts` | **Stable** | |
+| 35 | `eth_getLogs` | **Stable** | 含 fromBlock/toBlock/topics/blockHash/txIndex/logIndex |
+| 36 | `eth_newFilter` | **Stable** | |
+| 37 | `eth_newBlockFilter` | **Stable** | |
+| 38 | `eth_newPendingTransactionFilter` | **Stable** | |
+| 39 | `eth_uninstallFilter` | **Stable** | |
+| 40 | `eth_getFilterChanges` | **Stable** | 支持 Log/Block/PendingTransaction 三种 filter |
+| 41 | `eth_getFilterLogs` | **Stable** | |
+| 42 | `eth_getWork` | **Stable** | PoW only，返回 unsupported |
+| 43 | `eth_submitWork` | **Stable** | PoW only，返回 unsupported |
+| 44 | `eth_submitHashrate` | **Stable** | PoW only，返回 unsupported |
+| 45 | `eth_getProof` | **Stable** | 真正 Merkle proof（`reth-trie` 持久化 trie 节点） |
+| 46 | `eth_subscribe` | **Stable** | WebSocket，支持 newHeads/logs/newPendingTransactions |
+| 47 | `eth_unsubscribe` | **Stable** | WebSocket |
 
 ---
 

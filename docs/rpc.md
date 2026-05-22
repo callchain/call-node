@@ -1,5 +1,10 @@
 # Callchain RPC Layer
 
+> **API Stability**: This document uses stability annotations per endpoint:
+> - **Stable** — Backward-compatible within a major version. Breaking changes require a major version bump and migration window.
+> - **Experimental** — May change without notice. Not recommended for production integrations.
+> - **Deprecated** — Planned for removal in a future version. Migration path documented where applicable.
+
 ## Overview
 
 The RPC Layer (`crates/rpc`) provides external access to Callchain via JSON-RPC (HTTP) and WebSocket subscriptions. It exposes two endpoint families:
@@ -25,7 +30,7 @@ All state-mutating operations are submitted via standard `eth_sendRawTransaction
 
 ## Endpoint Inventory
 
-### Ethereum-Compatible RPC (`eth_*`)
+### Ethereum-Compatible RPC (`eth_*`) — **Stable**
 
 Callchain implements the standard Ethereum JSON-RPC surface for wallet, explorer, and dApp compatibility. All state-mutating calls go through `eth_sendRawTransaction` (no direct write endpoints). Read-only queries support `blockTag` for historical state when running an archive node.
 
@@ -42,41 +47,43 @@ Callchain implements the standard Ethereum JSON-RPC surface for wallet, explorer
 
 **Full compatibility audit**: 47 methods audited for completeness, historical state support, Filter API, WebSocket subscriptions, and local keystore signing. See [`eth_rpc.md`](eth_rpc.md) for the detailed per-method audit report.
 
-### Read-Only Callchain RPC (`call_*`)
+> All `eth_*` methods follow the Ethereum JSON-RPC specification. Response formats and semantics are stable and match Ethereum mainnet behavior where applicable. Callchain-specific deviations (e.g., `difficulty` = `0x0`, no uncle blocks) are documented in `eth_rpc.md`.
 
-| Endpoint | Description |
-|----------|-------------|
-| `call_assetInfo` | Returns asset metadata by `asset_id` |
-| `call_protocolBalance` | Returns protocol-layer balance for an address and asset |
-| `call_getNonce` | Returns the next nonce for an address |
-| `call_compliancePolicy` | Returns compliance policy for an asset |
-| `call_totalBalance` | **Legacy** — returns outdated `Asset.total_supply` field; use `call_assetInfo` instead |
-| `call_agentInfo` | Returns agent metadata by `agent_id` |
-| `call_agentBalance` | Returns total balance held by an agent |
-| `call_agentHistory` | Returns receipt history filtered by agent owner |
-| `call_shieldedDepositProve` | Returns error — proving requires local `call-cli` or dedicated prover service |
-| `call_shieldedTransferProve` | Returns error — proving requires local `call-cli` or dedicated prover service |
-| `call_shieldedBalance` | Queries shielded balance for a viewing key |
-| `call_shieldedTreeState` | Returns Merkle tree root, leaf count, nullifier count |
-| `call_getTransactionReceipt` | Returns protocol receipt by tx hash (Callchain-native) |
-| `call_getBlockReceipts` | Returns all receipts for a given block height |
-| `call_getLogs` | Returns logs filtered by address (Callchain-native) |
-| `call_getTxByReference` | Looks up a receipt by external reference / tx hash |
-| `call_getRollbackHistory` | Returns rollback signature history from `ForkManager` |
-| `call_getScheduledUpgrades` | Returns scheduled fork upgrades and next activation |
-| `call_lightVerifyBlockHeader` | Verifies block header signatures against validator quorum |
-| `call_lightGetBalanceProof` | Generates Merkle proofs for shielded note commitments |
-| `call_lightGetTransactionProof` | Returns receipt inclusion proof for a tx hash |
-| `call_lightVerifyShieldedTx` | Validates nullifier sets against spent state |
-| `call_lightGetShieldedBalance` | Returns shielded note/nullifier counts for a viewing key |
-| `call_governanceGetProposal` | Returns proposal details by `proposal_id` |
-| `call_governanceGetAllProposals` | Returns all proposals summary |
-| `call_governanceIsPaused` | Returns whether the chain is under emergency pause |
-| `call_oracleGetPrice` | Returns median price, submission count, staleness for an asset |
-| `call_oracleGetTwap` | Returns 24h TWAP for an asset |
-| `call_oracleGetValidatorInfo` | Returns oracle participation stats for a validator |
-| `call_bridgeGetDepositStatus` | Returns per-deposit status by `sourceTxHash` |
-| `call_validatorList` | Returns all validators with stake and bonding info |
+### Read-Only Callchain RPC (`call_*`) — **Stable**
+
+| Endpoint | Status | Description |
+|----------|--------|-------------|
+| `call_assetInfo` | **Stable** | Returns asset metadata by `asset_id` |
+| `call_protocolBalance` | **Stable** | Returns protocol-layer balance for an address and asset |
+| `call_getNonce` | **Stable** | Returns the next nonce for an address |
+| `call_compliancePolicy` | **Stable** | Returns compliance policy for an asset |
+| `call_totalBalance` | **Deprecated** | Returns outdated `Asset.total_supply` field; use `call_assetInfo` instead |
+| `call_agentInfo` | **Stable** | Returns agent metadata by `agent_id` |
+| `call_agentBalance` | **Stable** | Returns total balance held by an agent |
+| `call_agentHistory` | **Stable** | Returns receipt history filtered by agent owner |
+| `call_shieldedDepositProve` | **Deprecated** | Returns error — proving requires local `call-cli` or dedicated prover service |
+| `call_shieldedTransferProve` | **Deprecated** | Returns error — proving requires local `call-cli` or dedicated prover service |
+| `call_shieldedBalance` | **Stable** | Queries shielded balance for a viewing key |
+| `call_shieldedTreeState` | **Stable** | Returns Merkle tree root, leaf count, nullifier count |
+| `call_getTransactionReceipt` | **Stable** | Returns protocol receipt by tx hash (Callchain-native) |
+| `call_getBlockReceipts` | **Stable** | Returns all receipts for a given block height |
+| `call_getLogs` | **Stable** | Returns logs filtered by address (Callchain-native) |
+| `call_getTxByReference` | **Stable** | Looks up a receipt by external reference / tx hash |
+| `call_getRollbackHistory` | **Stable** | Returns rollback signature history from `ForkManager` |
+| `call_getScheduledUpgrades` | **Experimental** | Returns scheduled fork upgrades and next activation |
+| `call_lightVerifyBlockHeader` | **Stable** | Verifies block header signatures against validator quorum |
+| `call_lightGetBalanceProof` | **Stable** | Generates Merkle proofs for shielded note commitments |
+| `call_lightGetTransactionProof` | **Stable** | Returns receipt inclusion proof for a tx hash |
+| `call_lightVerifyShieldedTx` | **Stable** | Validates nullifier sets against spent state |
+| `call_lightGetShieldedBalance` | **Stable** | Returns shielded note/nullifier counts for a viewing key |
+| `call_governanceGetProposal` | **Stable** | Returns proposal details by `proposal_id` |
+| `call_governanceGetAllProposals` | **Stable** | Returns all proposals summary |
+| `call_governanceIsPaused` | **Stable** | Returns whether the chain is under emergency pause |
+| `call_oracleGetPrice` | **Stable** | Returns median price, submission count, staleness for an asset |
+| `call_oracleGetTwap` | **Stable** | Returns 24h TWAP for an asset |
+| `call_oracleGetValidatorInfo` | **Stable** | Returns oracle participation stats for a validator |
+| `call_bridgeGetDepositStatus` | **Stable** | Returns per-deposit status by `sourceTxHash` |
+| `call_validatorList` | **Stable** | Returns all validators with stake and bonding info |
 
 ### EVM Precompile Write Operations
 
@@ -241,21 +248,21 @@ Receipt stored after block finalization
 
 ---
 
-## WebSocket Subscriptions
+## WebSocket Subscriptions — **Stable**
 
 9 subscription channels with broadcast capacity:
 
-| Subscribe | Unsubscribe | Capacity | Event Payload |
-|-----------|-------------|----------|---------------|
-| `call_subscribeNewBlocks` | `call_unsubscribeNewBlocks` | 1024 | `{ height, hash, proposer, tx_count }` |
-| `call_subscribeNewPayments` | `call_unsubscribeNewPayments` | 1024 | `{ tx_hash, from, to, asset_id, amount }` |
-| `call_subscribeBridgeCompleted` | `call_unsubscribeBridgeCompleted` | 256 | `{ op_id, status }` |
-| `call_subscribeAssetRegistered` | `call_unsubscribeAssetRegistered` | 256 | `{ asset_id, symbol, issuer }` |
-| `call_subscribeAgentExecuted` | `call_unsubscribeAgentExecuted` | 256 | `{ agent_id, action }` |
-| `call_subscribeAgentRevoked` | `call_unsubscribeAgentRevoked` | 256 | `{ agent_id }` |
-| `call_subscribeShieldedDeposit` | `call_unsubscribeShieldedDeposit` | 512 | `{ commitment }` |
-| `call_subscribeShieldedWithdrawal` | `call_unsubscribeShieldedWithdrawal` | 512 | `{ nullifier }` |
-| `call_subscribeGovernance` | `call_unsubscribeGovernance` | 256 | `{ event, proposal_id, details }` |
+| Subscribe | Unsubscribe | Status | Capacity | Event Payload |
+|-----------|-------------|--------|----------|---------------|
+| `call_subscribeNewBlocks` | `call_unsubscribeNewBlocks` | **Stable** | 1024 | `{ height, hash, proposer, tx_count }` |
+| `call_subscribeNewPayments` | `call_unsubscribeNewPayments` | **Stable** | 1024 | `{ tx_hash, from, to, asset_id, amount }` |
+| `call_subscribeBridgeCompleted` | `call_unsubscribeBridgeCompleted` | **Stable** | 256 | `{ op_id, status }` |
+| `call_subscribeAssetRegistered` | `call_unsubscribeAssetRegistered` | **Stable** | 256 | `{ asset_id, symbol, issuer }` |
+| `call_subscribeAgentExecuted` | `call_unsubscribeAgentExecuted` | **Stable** | 256 | `{ agent_id, action }` |
+| `call_subscribeAgentRevoked` | `call_unsubscribeAgentRevoked` | **Stable** | 256 | `{ agent_id }` |
+| `call_subscribeShieldedDeposit` | `call_unsubscribeShieldedDeposit` | **Stable** | 512 | `{ commitment }` |
+| `call_subscribeShieldedWithdrawal` | `call_unsubscribeShieldedWithdrawal` | **Stable** | 512 | `{ nullifier }` |
+| `call_subscribeGovernance` | `call_unsubscribeGovernance` | **Stable** | 256 | `{ event, proposal_id, details }` |
 
 Subscribers that fall behind receive a `Lagged { dropped: N }` notification.
 
@@ -292,18 +299,18 @@ Uses `Halo2Prover::global()` from `call-shielded` which generates universal para
 
 ## Production Readiness Assessment
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| HTTP JSON-RPC server | Ready | jsonrpsee is production-grade, TLS + rate limiting configured |
-| Standard Ethereum RPC | Ready | 47 endpoints; full audit in `eth_rpc.md` |
-| EVM precompile write flow | Ready | All state mutations go through `eth_sendRawTransaction` targeting precompile addresses |
-| Precompile-based flow | Ready | All state mutations go through EVM tx → precompile → mempool → consensus |
-| Agent RPC | Ready | `RegisterAgent` / `GrantAgentBalance` / `RevokeAgentBalance` via `eth_sendRawTransaction` |
-| Rollback RPC | Ready | `SubmitRollbackSignature` via `eth_sendRawTransaction` |
-| Governance RPC | Ready | Read-only queries + `eth_sendRawTransaction` for state changes |
-| Oracle RPC | Ready | Read-only price and TWAP queries; submission is via consensus |
-| Bridge RPC | Ready | Deposit + withdraw via `eth_sendRawTransaction`; per-deposit status lookup |
-| Shielded RPC | Ready | Proving via dedicated service (`call-prover`), balance query wired |
-| Light client RPC | Ready | Real Merkle proofs, shielded validation correct |
-| WebSocket subscriptions | Ready | Lag notifications sent to subscribers |
-| CORS configuration | Ready | Configurable via `RpcConfig.cors_allowed_origins` |
+| Component | Status | Stability | Notes |
+|-----------|--------|-----------|-------|
+| HTTP JSON-RPC server | Ready | **Stable** | jsonrpsee is production-grade, TLS + rate limiting configured |
+| Standard Ethereum RPC | Ready | **Stable** | 47 endpoints; full audit in `eth_rpc.md` |
+| EVM precompile write flow | Ready | **Stable** | All state mutations go through `eth_sendRawTransaction` targeting precompile addresses |
+| Precompile-based flow | Ready | **Stable** | All state mutations go through EVM tx → precompile → mempool → consensus |
+| Agent RPC | Ready | **Stable** | `RegisterAgent` / `GrantAgentBalance` / `RevokeAgentBalance` via `eth_sendRawTransaction` |
+| Rollback RPC | Ready | **Stable** | `SubmitRollbackSignature` via `eth_sendRawTransaction` |
+| Governance RPC | Ready | **Stable** | Read-only queries + `eth_sendRawTransaction` for state changes |
+| Oracle RPC | Ready | **Stable** | Read-only price and TWAP queries; submission is via consensus |
+| Bridge RPC | Ready | **Stable** | Deposit + withdraw via `eth_sendRawTransaction`; per-deposit status lookup |
+| Shielded RPC | Ready | **Stable** | Proving via dedicated service (`call-prover`), balance query wired |
+| Light client RPC | Ready | **Stable** | Real Merkle proofs, shielded validation correct |
+| WebSocket subscriptions | Ready | **Stable** | Lag notifications sent to subscribers |
+| CORS configuration | Ready | **Stable** | Configurable via `RpcConfig.cors_allowed_origins` |

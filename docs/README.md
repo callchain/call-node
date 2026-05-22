@@ -25,6 +25,13 @@ The documents below cover protocol design, operational guides, API references, a
 | [`spec.md`](spec.md) | Complete protocol specification, architecture, and design principles |
 | [`CALL.md`](CALL.md) | The CALL token and native asset design |
 
+## Getting Started
+
+| Document | What you'll learn |
+|----------|-----------------|
+| [`quickstart.md`](quickstart.md) | Zero to first transaction in 5 minutes (Docker or source) |
+| [`faq.md`](faq.md) | Frequently asked questions: hardware, sync, gas, staking, bridge |
+
 ## How To Use
 
 | Document | What you'll learn |
@@ -34,6 +41,7 @@ The documents below cover protocol design, operational guides, API references, a
 | [`how-to/for-validator.md`](how-to/for-validator.md) | Validator operations: staking, oracle, bridge attestation, key rotation, slashing |
 | [`how-to/for-bridge.md`](how-to/for-bridge.md) | Bridge operations: deposits, withdrawals, challenges, fraud proofs |
 | [`how-to/for-light-client.md`](how-to/for-light-client.md) | Light client operations: checkpoint, header sync, MPT proofs, reorg handling |
+| [`how-to/docker-compose-devnet.md`](how-to/docker-compose-devnet.md) | Run a local devnet with Docker Compose (single-node or multi-node BFT) |
 
 ## Architecture & Design
 
@@ -70,13 +78,16 @@ The documents below cover protocol design, operational guides, API references, a
 |----------|-------------|
 | [`rpc.md`](rpc.md) | JSON-RPC server: HTTP, WebSocket, subscriptions, methods |
 | [`eth_rpc.md`](eth_rpc.md) | Ethereum-compatible RPC methods (`eth_*`) |
+| [`error-codes.md`](error-codes.md) | Complete error code reference for all protocol modules and RPC |
 
 ## Observability & Operations
 
 | Document | Description |
 |----------|-------------|
 | [`observability.md`](observability.md) | Prometheus metrics, OpenTelemetry tracing, logging, alerts, health checks |
+| [`benchmarks.md`](benchmarks.md) | Performance benchmarks, MDBX tuning, production sizing guide |
 | [`release.md`](release.md) | Release process, key management, genesis, deployment, rollback |
+| [`version-migration.md`](version-migration.md) | Version upgrade checklist, rolling upgrade, rollback procedures |
 | [`validator_staking.md`](validator_staking.md) | Validator staking mechanics |
 | [`validator_key_rotation.md`](validator_key_rotation.md) | Key rotation protocol and emergency procedures |
 | [`prover_key_rotation.md`](prover_key_rotation.md) | ZK prover key rotation |
@@ -96,6 +107,15 @@ The documents below cover protocol design, operational guides, API references, a
 | [`halo2.md`](halo2.md) | Halo2 circuit design and constraints |
 | [`zk.md`](zk.md) | Zero-knowledge proof system overview |
 | [`bls_consensus_verification.md`](bls_consensus_verification.md) | BLS signature verification in consensus |
+
+## Architecture Decisions
+
+| Document | Description |
+|----------|-------------|
+| [`adr/README.md`](adr/README.md) | ADR overview and proposal process |
+| [`adr/0001-use-mdbx-as-sole-storage.md`](adr/0001-use-mdbx-as-sole-storage.md) | MDBX as sole persistence backend |
+| [`adr/0002-unified-evm-execution.md`](adr/0002-unified-evm-execution.md) | Unified EVM execution via precompiles |
+| [`adr/0003-simplex-bft-consensus.md`](adr/0003-simplex-bft-consensus.md) | Simplex BFT with DPoS validator election |
 
 ## Research & Future
 
