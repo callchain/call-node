@@ -1,0 +1,199 @@
+# How-To: Bridge Operations
+
+The Callchain Bridge (`0x103`) enables cross-chain asset transfers between Callchain and Ethereum/Arbitrum. This guide covers the practical operations for validators, operators, and integrators.
+
+---
+
+## Deposit Paths
+
+### Path A: Validator Multi-Sig (Default)
+
+Validators attest to Ethereum bridge events using secp256k1 signatures. Minimum 14 signatures required (2/3 of 21 validators).
+
+**Event hash (signed by validators):**
+```
+event_hash = keccak256(
+    chain_id ||
+    source_tx_hash ||
+    source_block_number ||
+    sender ||
+    recipient ||
+    asset_id ||
+    amount
+)
+```
+
+**As a validator, submit an external deposit:**
+
+```bash
+# RPC call to submit validator-attested deposit
+curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "eth_sendTransaction",
+    "params": [{
+      "to": "0x0000000000000000000000000000000000000103",
+      "data": "0x...externalDeposit ABI encoding..."
+    }],
+    "id": 1
+  }'
+```
+
+**Requirements:**
+- Caller must be a registered validator
+- Caller and recipient must pass compliance check
+- `sourceTxHash` must not have been processed before
+- Asset must be in `allowed_assets` whitelist
+- `sourceContract` must be in `authorized_contracts` for the chain
+- Amount must not exceed `max_per_tx` or `daily_limit_per_asset`
+
+### Path B: Light Client (No Validator Signatures)
+
+Available with `light-client-bridge` feature. Users submit MPT proofs directly.
+
+**RPC endpoint:**
+```bash
+curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "call_lightClientBridgeDeposit",
+    "params": [
+      "0x...header_rlp...",
+      "0x...tx_proof...",
+      "0x...receipt_proof..."
+    ],
+    "id": 1
+  }'
+```
+
+**Verification steps:**
+1. Header verified via parent-hash chain
+2. Tx inclusion verified via MPT proof against `transactions_root`
+3. Receipt verified via MPT proof against `receipts_root`
+4. Bridge event parsed from receipt logs
+5. Consensus finalization checked
+
+---
+
+## Withdrawals
+
+**Call `externalWithdraw` on Callchain (precompile `0x103`):**
+
+```bash
+curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "eth_sendTransaction",
+    "params": [{
+      "to": "0x0000000000000000000000000000000000000103",
+      "data": "0x...externalWithdraw ABI encoding..."
+    }],
+    "id": 1
+  }'
+```
+
+Flow:
+1. Protocol balance burned on Callchain
+2. `ExternalWithdraw` event emitted
+3. Validators observe event and release on Ethereum
+
+---
+
+## Challenge Flow
+
+Anyone can challenge a fraudulent deposit during the challenge period (~14 days).
+
+### Initiate a Challenge
+
+```bash
+# Submit challenge with bond
+curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "eth_sendTransaction",
+    "params": [{
+      "to": "0x0000000000000000000000000000000000000103",
+      "data": "0x...initiateChallenge ABI encoding..."
+    }],
+    "id": 1
+  }'
+```
+
+Requirements:
+- Bond: default `1,000` CALL
+- Challenge period: default `2,419,200` blocks (~14 days at 250ms block time)
+- Proof data: up to 16 KiB
+
+### Resolve a Challenge
+
+After the deadline, anyone can call `resolveChallenge`:
+
+```bash
+curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "eth_sendTransaction",
+    "params": [{
+      "to": "0x0000000000000000000000000000000000000103",
+      "data": "0x...resolveChallenge ABI encoding..."
+    }],
+    "id": 1
+  }'
+```
+
+Outcomes:
+- **Fraud proven** → Deposit rolled back, challenger receives bond + reward
+- **Fraud not proven** → Challenger forfeits bond
+
+### Fraud Proof Types
+
+**For Light Client path:**
+
+| Proof Type | Description |
+|------------|-------------|
+| `TxNonExistence` | MPT proof that source tx does not exist in source block's tx trie |
+| `ReceiptConflict` | MPT proof that receipt contradicts recorded deposit metadata |
+
+**For Validator path:**
+Proof is arbitrary bytes evaluated during `resolveChallenge`. The challenger must demonstrate the original deposit was fraudulent.
+
+---
+
+## Bridge Configuration
+
+Governance can update bridge parameters via proposals:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `challenge_period_blocks` | 2,419,200 | Challenge window in blocks |
+| `challenge_bond_amount` | 1,000 CALL | Bond required to challenge |
+| `max_per_tx` | Asset-specific | Max deposit per transaction |
+| `daily_limit_per_asset` | Asset-specific | Daily deposit limit |
+| `min_validator_signatures` | 14 | Min signatures for Path A |
+| `max_withdraw_per_period` | Asset-specific | Max withdrawal per period |
+
+---
+
+## Monitoring
+
+| Metric | Source | Alert |
+|--------|--------|-------|
+| `total_deposits` | EVM storage | Growing = healthy bridge |
+| `total_withdrawals` | EVM storage | Growing = healthy withdrawals |
+| Pending challenges | EVM storage | Old challenges need resolution |
+| Daily limit usage | EVM storage | Approaching limit = throttle |
+
+---
+
+## Emergency Procedures
+
+**Pause bridge (governance only):**
+```bash
+# Submit GovernancePauseBridge proposal
+# After timelock, bridge rejects all new deposits/withdrawals
+```
+
+**Resume bridge (governance only):**
+```bash
+# Submit GovernanceResumeBridge proposal
+```
