@@ -1,0 +1,27 @@
+# cargo-audit configuration for Callchain node
+# https://github.com/RustSec/rustsec/blob/main/cargo-audit/audit.toml.example
+#
+# These advisories are all in upstream transitive dependencies (reth, rustls,
+# jsonrpsee, etc.) and cannot be resolved by semver-compatible `cargo update`.
+# They must wait for the upstream crates to release new major versions.
+
+[advisories]
+ignore = [
+    "RUSTSEC-2023-0089",  # atomic-polyfill unmaintained (transitive via ark-ec)
+    "RUSTSEC-2024-0388",  # derivative unmaintained
+    "RUSTSEC-2024-0436",  # paste unmaintained
+    "RUSTSEC-2025-0055",  # tracing-subscriber ANSI injection in logs (transitive, old version pulled by reth)
+    "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained (transitive via rustls)
+    "RUSTSEC-2025-0141",  # bincode unmaintained (transitive via reth)
+    "RUSTSEC-2026-0097",  # rand unsound with custom logger
+    "RUSTSEC-2026-0098",  # rustls-webpki URI name constraints
+    "RUSTSEC-2026-0099",  # rustls-webpki wildcard name constraints
+    "RUSTSEC-2026-0104",  # x509-parser CRL parsing panic
+    "RUSTSEC-2026-0119",  # hickory-proto O(n²) name compression (needs hickory-resolver >=0.26)
+]
+
+[output]
+deny = [
+    "unsound",
+    "yanked",
+]
