@@ -266,6 +266,145 @@ sudo systemctl enable callchaind
 sudo systemctl start callchaind
 ```
 
+## Daily Operations
+
+### Start / Stop / Restart
+
+```bash
+# Start
+sudo systemctl start callchaind
+
+# Stop (graceful — waits for in-flight block production)
+sudo systemctl stop callchaind
+
+# Restart
+sudo systemctl restart callchaind
+
+# Check status
+sudo systemctl status callchaind
+```
+
+### Check Sync Status
+
+A new or restarted node must sync blocks from peers before it can serve RPC queries or participate in consensus.
+
+```bash
+# Query sync progress via RPC
+curl -s -X POST http://localhost:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_syncing","id":1}' | jq .
+```
+
+**Response when syncing:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "startingBlock": "0x0",
+    "currentBlock": "0x1234",
+    "highestBlock": "0x5678"
+  },
+  "id": 1
+}
+```
+
+**Response when fully synced:**
+```json
+{ "jsonrpc": "2.0", "result": false, "id": 1 }
+```
+
+### Check Latest Block
+
+```bash
+curl -s -X POST http://localhost:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","id":1}' | jq .
+```
+
+### View Live Logs
+
+```bash
+# Follow logs via journald
+sudo journalctl -u callchaind -f
+
+# Filter for consensus events
+sudo journalctl -u callchaind -f | grep "BFT\|consensus\|block"
+
+# JSON logs with jq
+sudo tail -f /var/log/callchain/node.log | jq '. | select(.fields.height)'
+```
+
+---
+
+## Data Pruning
+
+Callchain stores all data in MDBX (`/var/lib/callchain/mdbx/`). Without pruning, disk usage grows indefinitely. The node supports three operating modes that control retention.
+
+### Node Modes
+
+| Mode | Data Retained | Use Case | Disk Growth |
+|------|--------------|----------|-------------|
+| `Full` (default) | Current state + recent 100K blocks + 1M receipts | Standard RPC node | ~50 GB/month |
+| `Archive` | All historical state, blocks, receipts | Block explorers, indexers | Unbounded |
+| `Light` | Last 1,000 blocks only | Edge / IoT deployments | ~1 GB/month |
+
+### Enabling Archive Mode
+
+Archive mode disables all pruning. Enable it before first boot (cannot be toggled on an existing database without a full resync).
+
+**Via CLI:**
+```bash
+calld --config /etc/callchain/config.toml --archive
+```
+
+**Via config:**
+```toml
+[storage]
+data_dir = "/var/lib/callchain"
+# snapshot_retention_blocks = u64::MAX  # implied by archive mode
+```
+
+### Configuring Pruning Retention
+
+For full / validator nodes, tune retention in `config.toml`:
+
+```toml
+[storage]
+# Number of recent blocks with full state snapshots (default: 128)
+# Set to u64::MAX for archive mode
+snapshot_retention_blocks = 128
+```
+
+The node also runs automatic layered pruning every 10,000 blocks:
+
+| Layer | Default Retention | What Gets Removed |
+|-------|-------------------|-------------------|
+| State snapshots | 128 blocks | Old `InMemoryStateProvider` clones |
+| Account history | 50,000 blocks | Historical `AccountHistory` diffs |
+| Block bodies | 100,000 blocks | Old transaction lists |
+| Receipts / logs | 1,000,000 blocks | Old execution receipts |
+
+> **Warning:** Reducing `snapshot_retention_blocks` below 128 will break `eth_call` and `eth_estimateGas` for historical blocks beyond the retention window.
+
+### Manual Pruning
+
+The node prunes automatically during block production. There is no manual prune CLI command. If disk space is critically low:
+
+1. Stop the node: `sudo systemctl stop callchaind`
+2. Back up the database
+3. Restart with archive mode disabled (if currently enabled)
+4. Monitor `metrics_db_size_bytes` to confirm reduction
+
+### Disk Usage Estimates
+
+| Node Type | 1 Month | 6 Months | 1 Year |
+|-----------|---------|----------|--------|
+| Full (pruned) | ~50 GB | ~200 GB | ~350 GB |
+| Archive | ~200 GB | ~1.2 TB | ~2.5 TB |
+| Light | ~1 GB | ~6 GB | ~12 GB |
+
+---
+
 ## Monitoring
 
 ### Prometheus Metrics
@@ -345,12 +484,61 @@ sudo tail -f /var/log/callchain/node.log | jq .
 
 ## Backup and Recovery
 
-### Regular Backup
+### What to Back Up
+
+A complete backup includes three components:
+
+| Component | Path | Size | Frequency |
+|-----------|------|------|-----------|
+| MDBX database | `/var/lib/callchain/mdbx/` | Majority of disk usage | Daily |
+| Configuration | `/etc/callchain/config.toml` | ~1 KB | On change |
+| Validator keys | `/etc/callchain/validator.key` | ~64 B | Once + on rotation |
+
+> **Note:** The `snapshots/` subdirectory inside `data_dir` contains validator-signed state snapshots. Backing these up is optional — they can be regenerated, but keeping them accelerates recovery.
+
+### Regular Backup (Offline)
+
+Stop the node before backing up MDBX to ensure a consistent snapshot:
 
 ```bash
 sudo systemctl stop callchaind
 sudo tar czf /backup/callchain-$(date +%Y%m%d).tar.gz -C /var/lib/callchain .
 sudo systemctl start callchaind
+```
+
+For large databases, consider using `rsync` for incremental backups instead of full tar archives.
+
+### Automated Backup Script
+
+Create `/etc/callchain/backup.sh`:
+
+```bash
+#!/bin/bash
+set -e
+DATA_DIR="/var/lib/callchain"
+BACKUP_DIR="/backup"
+DATE=$(date +%Y%m%d_%H%M%S)
+
+# Stop node for consistent backup
+systemctl stop callchaind
+
+# Backup data + config
+tar czf "${BACKUP_DIR}/callchain-${DATE}.tar.gz" \
+  -C "${DATA_DIR}" . \
+  -C /etc/callchain config.toml
+
+# Keep only last 7 backups
+ls -1t "${BACKUP_DIR}"/callchain-*.tar.gz | tail -n +8 | xargs -r rm -f
+
+# Restart node
+systemctl start callchaind
+
+echo "Backup complete: ${BACKUP_DIR}/callchain-${DATE}.tar.gz"
+```
+
+Add to crontab for daily 3 AM backups:
+```bash
+0 3 * * * /etc/callchain/backup.sh >> /var/log/callchain/backup.log 2>&1
 ```
 
 ### Recovery from Snapshot
@@ -361,6 +549,20 @@ sudo rm -rf /var/lib/callchain/mdbx
 sudo tar xzf /backup/callchain-20260101.tar.gz -C /var/lib/callchain
 sudo systemctl start callchaind
 ```
+
+After recovery, the node will resume from the last persisted height and catch up via sync.
+
+### Disaster Recovery: Re-sync from Genesis
+
+If the database is corrupted and no backup is available:
+
+```bash
+sudo systemctl stop callchaind
+sudo rm -rf /var/lib/callchain/mdbx/*
+sudo systemctl start callchaind
+```
+
+The node will re-initialize from genesis and begin syncing blocks from peers. This is much slower than restoring from backup.
 
 ## Upgrades
 
@@ -389,6 +591,75 @@ sudo cp /usr/local/bin/calld.backup /usr/local/bin/calld
 # If schema changed, restore DB from pre-upgrade snapshot
 sudo systemctl start callchaind
 ```
+
+## Data Sync
+
+### Initial Sync for New Nodes
+
+When a new node starts for the first time, it performs an initial sync:
+
+1. **Genesis initialization** — Loads genesis file, creates initial validator set and balances
+2. **P2P peer discovery** — Connects to bootstrap peers via `SYNC_CHANNEL = 3`
+3. **Block sync** — Requests missing blocks from peers in batches
+4. **State validation** — Re-executes each synced block to verify state roots
+5. **Live catch-up** — Once near the chain tip, switches to block announcements
+
+**Typical sync speed:** ~100-500 blocks/second depending on network latency and block complexity.
+
+### Fast Sync via State Snapshots
+
+Instead of replaying every block from genesis, a node can fast-sync from a trusted state snapshot:
+
+1. Obtain a validator-signed state snapshot from a trusted source (another operator, snapshot service)
+2. Place the snapshot file in `/var/lib/callchain/snapshots/`
+3. Start the node — it will detect the snapshot and validate signatures against the current validator set
+4. If 2/3 validator signatures are valid, the node fast-forwards to the snapshot height and resumes sync from there
+
+> **Security:** Only use snapshots from trusted sources. An invalid snapshot will cause the node to reject it and fall back to full block sync.
+
+### Catch-Up Sync for Offline Nodes
+
+If a validator or full node was offline for a period:
+
+```bash
+# Start the node — it automatically detects the gap
+sudo systemctl start callchaind
+
+# Monitor catch-up progress
+sudo journalctl -u callchaind -f | grep "sync\|catch-up"
+```
+
+The node will:
+1. Read its last persisted height from MDBX
+2. Query peers for their current height
+3. Request missing block ranges via `SyncRequest`
+4. Apply each `SyncResponse` batch, validating state roots
+5. Resume normal operation once caught up
+
+### Sync Status Monitoring
+
+```bash
+# Check if syncing
+curl -s -X POST http://localhost:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_syncing","id":1}' | jq .
+
+# Compare local height to network height
+curl -s -X POST http://localhost:8545 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","id":1}' | jq .
+```
+
+### Troubleshooting Slow Sync
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Sync stalls at same height | Missing block in peer responses | Restart node to reconnect to different peers |
+| Very slow sync (<10 bps) | High-latency peers or large blocks | Increase `max_peers` in config to find closer peers |
+| "State root mismatch" after sync | Corrupt database or invalid snapshot | Wipe `mdbx/` and re-sync from genesis or a fresh snapshot |
+| Sync never starts | No peers connected | Check bootstrap peers, firewall rules, network connectivity |
+
+---
 
 ## Validator Operations
 
