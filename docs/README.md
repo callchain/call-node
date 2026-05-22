@@ -38,6 +38,7 @@ New to Callchain? Start here:
 | [`oracle.md`](oracle.md) | Price feed oracle with P2P aggregation |
 | [`compliance.md`](compliance.md) | Compliance engine, sanctions list, issuer policies |
 | [`precompile.md`](precompile.md) | All EVM precompiles (`0x101`–`0x209`) |
+| [`switch.md`](switch.md) | Internal bridge (escrow vs mint-burn per asset) |
 
 ## Assets & Issuance
 
@@ -86,7 +87,6 @@ New to Callchain? Start here:
 | [`future.md`](future.md) | Roadmap and planned features |
 | [`vitalik-zk-payment.md`](vitalik-zk-payment.md) | Vitalik's ZK payment design analysis |
 | [`seismic.md`](seismic.md) | Seismic / encrypted memory research |
-| [`switch.md`](switch.md) | Internal bridge design (escrow vs mint-burn) |
 | [`upgrade.md`](upgrade.md) | Protocol upgrade mechanism |
 
 ## Production Readiness
