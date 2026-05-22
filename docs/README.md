@@ -6,6 +6,20 @@ This directory contains the complete documentation for the Callchain node.
 
 ## Overview
 
+Callchain is a Layer 1 blockchain built on a unified EVM execution architecture. Every transaction — whether a simple payment, governance vote, oracle price submission, or cross-chain bridge operation — executes inside the EVM via precompiled contracts (`0x101`–`0x209`). Consensus is driven by Commonware Simplex BFT, with a validator set elected through DPoS staking of the native CALL token.
+
+**Key features:**
+
+- **Ethereum-compatible RPC** — 47 `eth_*` methods, full blockTag history, Merkle proofs, Filter API, WebSocket subscriptions
+- **Unified EVM execution** — No dual ledger; protocol state changes happen inside EVM precompiles
+- **Cross-chain bridge** — Validator multi-sig deposits with challenge periods, plus light-client MPT proof path
+- **Decentralized oracle** — Ed25519-signed price submissions, median aggregation, outlier detection
+- **Shielded transactions** — Halo2 ZK proofs for private deposits, transfers, and withdrawals
+- **On-chain governance** — Proposal types for parameter changes, validator key rotation, emergency pause
+- **Compliance engine** — Per-asset sanctions lists and issuer policies
+
+The documents below cover protocol design, operational guides, API references, and security research.
+
 | Document | What you'll learn |
 |----------|-----------------|
 | [`spec.md`](spec.md) | Complete protocol specification, architecture, and design principles |
