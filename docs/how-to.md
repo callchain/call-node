@@ -225,15 +225,29 @@ docker run -d \
   --config /config/config.toml
 ```
 
+#### Docker (Full Node)
+
+```bash
+docker run -d \
+  --name callchain-fullnode \
+  -v /etc/callchain:/config \
+  -v /var/lib/callchain:/data \
+  -p 8545:8545 \
+  -p 8546:8546 \
+  -p 51235:51235 \
+  -p 9090:9090 \
+  ghcr.io/callchain/callchaind:v0.1.0-testnet \
+  --config /config/config.toml
+```
+
 ### Configuration
 
-Create `/etc/callchain/config.toml`:
+#### Validator Node Configuration
 
 ```toml
 [mode]
 # "solo" = single-node producer (dev/test)
 # "validator" = BFT consensus validator
-# "full" = non-validating full node
 mode = "validator"
 
 [keys]
@@ -288,6 +302,56 @@ require_signatures = true
 # beacon_url = "https://eth-mainnet.g.alchemy.com/v2/..."
 # checkpoint_file = "/etc/callchain/checkpoint.json"
 ```
+
+#### Full Node Configuration
+
+Full nodes do not participate in consensus (no block production, no voting). They sync, validate, and serve RPC queries.
+
+```toml
+[mode]
+mode = "full"
+
+[genesis]
+path = "/etc/callchain/genesis.json"
+
+[p2p]
+listen_addr = "0.0.0.0:51235"
+bootstrap_peers = [
+    "peer_id_1@bootstrap1.callchain.org:51235",
+    "peer_id_2@bootstrap2.callchain.org:51235",
+]
+max_peers = 50
+
+[rpc]
+http_addr = "0.0.0.0:8545"
+ws_addr = "0.0.0.0:8546"
+max_connections = 1000
+
+# Rate limiting
+rate_limit_rps = 100
+rate_limit_window_secs = 60
+
+[storage]
+data_dir = "/var/lib/callchain"
+db_cache_size = 2048
+# archive = true  # Keep all history (disables pruning)
+
+[metrics]
+addr = "0.0.0.0:9090"
+
+[logging]
+level = "info"
+format = "json"
+
+[governance]
+require_signatures = true
+```
+
+**Key differences from validator:**
+- No `[keys]` section (no validator key required)
+- No `validator_keystore` / `vault_*` configuration
+- Lower resource requirements (CPU and RAM)
+- Can run in `archive` mode to serve historical queries
 
 ### Key Management
 
