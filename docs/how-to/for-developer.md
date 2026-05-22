@@ -5,6 +5,7 @@
 - Rust 1.82 or later
 - Cargo (comes with Rust)
 - Git
+- `cargo-fuzz` for fuzz testing: `cargo install cargo-fuzz`
 - ~8GB RAM for full test suite
 - ~2GB disk for build artifacts
 

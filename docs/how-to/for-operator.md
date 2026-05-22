@@ -38,7 +38,7 @@ docker run -d \
   -v /var/lib/callchain:/data \
   -p 8545:8545 \
   -p 8546:8546 \
-  -p 30303:30303 \
+  -p 51235:51235 \
   -p 9090:9090 \
   ghcr.io/callchain/callchaind:v0.1.0-testnet \
   --config /config/config.toml

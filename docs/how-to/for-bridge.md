@@ -94,6 +94,8 @@ curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
 
 Available with `light-client-bridge` feature. Users submit MPT proofs directly.
 
+> **Production Note:** The `call_lightClientBridgeDeposit` RPC method is disabled on public RPC nodes for security. Direct EVM writes from external callers are not permitted. In production, use a dedicated bridge relayer with internal node access, or fall back to Path A (validator multi-sig).
+
 **RPC endpoint:**
 ```bash
 curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
@@ -194,24 +196,6 @@ After the `ExternalWithdraw` event is emitted on Callchain, validators monitor f
 - It constructs and submits the release transaction to Ethereum
 - Validators sign attestations; the relayer aggregates and submits them
 - Operators must ensure their relayer has ETH for gas on the Ethereum side
-
-```bash
-curl -X POST http://localhost:8545 -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "eth_sendTransaction",
-    "params": [{
-      "to": "0x0000000000000000000000000000000000000103",
-      "data": "0x...externalWithdraw ABI encoding..."
-    }],
-    "id": 1
-  }'
-```
-
-Flow:
-1. Protocol balance burned on Callchain
-2. `ExternalWithdraw` event emitted
-3. Validators observe event and release on Ethereum
 
 ---
 
