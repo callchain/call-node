@@ -560,7 +560,7 @@ async fn test_e2e_state_persistence_restart() {
                     &mut provider,
                     &mut s.fee_params,
                     height,
-                    Some(&node.state.db_env),
+                    Some(std::sync::Arc::clone(&node.state.db_env)),
                 )
                 .expect("execution");
             provider.state().save_to_db(&node.state.db_env).unwrap();
@@ -677,7 +677,7 @@ async fn test_crash_recovery_checkpoint_detected() {
                     &mut provider,
                     &mut s.fee_params,
                     height,
-                    Some(&node.state.db_env),
+                    Some(std::sync::Arc::clone(&node.state.db_env)),
                 )
                 .expect("execution");
             provider.state().save_to_db(&node.state.db_env).unwrap();

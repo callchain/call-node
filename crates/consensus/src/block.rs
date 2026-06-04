@@ -187,22 +187,35 @@ impl Block {
         provider: &mut call_evm::provider::InMemoryStateProvider,
         fee_params: &mut FeeParams,
         current_block_height: u64,
-        db_env: Option<&reth_db::DatabaseEnv>,
+        db_env: Option<std::sync::Arc<reth_db::DatabaseEnv>>,
     ) -> Result<BlockExecutionResult, ConsensusError> {
-        let provider_for_exec = provider.clone();
-        let (block_tx_result, revm_delta) = call_evm::block_executor::execute_block_transactions(
-            &self.evm_txs,
-            provider_for_exec,
-            current_block_height,
-            fee_params.base_fee,
-        )
-        .map_err(|e| ConsensusError::InvalidBlock(format!("evm execution failed: {e}")))?;
+        // Use LazyStateProvider for execution if db_env is available,
+        // avoiding the expensive full-state clone of InMemoryStateProvider.
+        let (block_tx_result, revm_delta) = if let Some(ref db) = db_env {
+            let lazy = call_evm::provider::LazyStateProvider::new(std::sync::Arc::clone(db));
+            call_evm::block_executor::execute_block_transactions(
+                &self.evm_txs,
+                lazy,
+                current_block_height,
+                fee_params.base_fee,
+            )
+            .map_err(|e| ConsensusError::InvalidBlock(format!("evm execution failed: {e}")))?
+        } else {
+            let provider_for_exec = provider.clone();
+            call_evm::block_executor::execute_block_transactions(
+                &self.evm_txs,
+                provider_for_exec,
+                current_block_height,
+                fee_params.base_fee,
+            )
+            .map_err(|e| ConsensusError::InvalidBlock(format!("evm execution failed: {e}")))?
+        };
 
         // Apply revm delta back to the provider.
         provider.state_mut().apply_from_revm_state(&revm_delta);
 
         // Record historical state diffs for eth_getBalance(blockTag) / eth_getStorageAt(blockTag)
-        if let Some(db) = db_env {
+        if let Some(ref db) = db_env {
             let _ = call_evm::db::record_revm_delta_history(db, current_block_height, &revm_delta);
         }
 
@@ -255,7 +268,7 @@ impl Block {
         result.state_root = root;
 
         // Persist trie nodes to MDBX for eth_getProof
-        if let Some(db) = db_env {
+        if let Some(ref db) = db_env {
             let _ = call_evm::db::apply_trie_updates_to_mdbx(db, &updates);
         }
 

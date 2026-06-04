@@ -79,7 +79,7 @@ impl<'a> StateWriteBundle<'a> {
             &mut provider,
             &mut self.fee_params,
             height,
-            Some(&self.db_env),
+            Some(std::sync::Arc::clone(&self.db_env)),
         )?;
         provider
             .state()
