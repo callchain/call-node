@@ -191,6 +191,39 @@ pub fn compute_state_root_with_updates(
     state_root.root_with_updates()
 }
 
+/// Compute the Ethereum state root incrementally using persisted trie nodes.
+///
+/// This is the preferred execution path for block production: instead of
+/// recomputing the trie from scratch (O(n)), it loads existing branch nodes
+/// from MDBX and only recomputes paths that changed according to `post_state`.
+///
+/// # Arguments
+/// - `db` — MDBX environment containing persisted trie nodes from previous
+///   blocks (written by [`crate::db::apply_trie_updates_to_mdbx`]).
+/// - `state` — Current full state (used for the hashed cursor factory).
+/// - `post_state` — The delta (only changed accounts/storage). Prefix sets are
+///   derived automatically so unchanged trie branches are reused.
+///
+/// # Returns
+/// The updated state root and the new [`TrieUpdates`] for persistence.
+pub fn compute_state_root_incremental(
+    db: &reth_db::DatabaseEnv,
+    state: &InMemoryStateProvider,
+    post_state: &reth_trie::HashedPostState,
+) -> Result<(B256, TrieUpdates), reth_execution_errors::StateRootError> {
+    let trie_factory =
+        MdbxTrieCursorFactory::from_db(db).map_err(|e| {
+            reth_execution_errors::StateRootError::Database(
+                reth_storage_errors::db::DatabaseError::Other(e.to_string()),
+            )
+        })?;
+    let hashed_factory = ProviderHashedCursorFactory::new(state);
+    let prefix_sets = post_state.construct_prefix_sets().freeze();
+    StateRoot::new(trie_factory, hashed_factory)
+        .with_prefix_sets(prefix_sets)
+        .root_with_updates()
+}
+
 // ── Proof Generation ──────────────────────────────────────────────────
 
 /// Compute an Ethereum account proof (including storage proofs) from the
@@ -762,6 +795,76 @@ mod tests {
             in_mem_proof.storage_proofs.len(),
             persistent_proof.storage_proofs.len()
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_incremental_root_matches_full_recompute() {
+        let tmp = std::env::temp_dir()
+            .join(format!("call-incremental-root-test-{}", std::process::id()));
+        let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
+
+        // 1. Build initial state with many accounts to create branch nodes
+        let mut state = InMemoryStateProvider::new();
+        for i in 1u8..=20 {
+            state.set_balance(test_addr(i), U256::from(i as u64 * 100));
+            state.create_account(test_addr(i));
+        }
+        state.set_storage(test_addr(2), U256::from(7), U256::from(99));
+
+        // 2. Compute full root and persist trie updates
+        let (_full_root, updates) = compute_state_root_with_updates(&state).expect("full root");
+        crate::db::apply_trie_updates_to_mdbx(&db, &updates).expect("apply updates");
+
+        // 3. Modify state: change balance of addr(5) and storage of addr(2)
+        state.set_balance(test_addr(5), U256::from(9999));
+        state.set_storage(test_addr(2), U256::from(7), U256::from(888));
+
+        // 4. Build HashedPostState from the delta (for prefix sets)
+        let post_state = hashed_post_state_from_provider(&state);
+
+        // 5. Compute incremental root using persisted trie nodes
+        let (incremental_root, _new_updates) =
+            compute_state_root_incremental(&db, &state, &post_state).expect("incremental root");
+
+        // 6. Compute full recompute of modified state for comparison
+        let (expected_root, _) = compute_state_root_with_updates(&state).expect("expected root");
+
+        assert_eq!(
+            incremental_root, expected_root,
+            "incremental root must match full recompute"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_incremental_root_with_account_destruction() {
+        let tmp = std::env::temp_dir()
+            .join(format!("call-incr-destroy-test-{}", std::process::id()));
+        let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
+
+        let mut state = InMemoryStateProvider::new();
+        state.set_balance(test_addr(1), U256::from(1000));
+        state.create_account(test_addr(1));
+        state.set_balance(test_addr(2), U256::from(2000));
+        state.create_account(test_addr(2));
+        state.set_storage(test_addr(1), U256::from(42), U256::from(123));
+
+        let (root1, updates) = compute_state_root_with_updates(&state).expect("root1");
+        crate::db::apply_trie_updates_to_mdbx(&db, &updates).expect("apply updates");
+
+        // Destroy account 1 by removing it from state
+        state.accounts.remove(&test_addr(1));
+
+        let post_state = hashed_post_state_from_provider(&state);
+        let (incremental_root, _) =
+            compute_state_root_incremental(&db, &state, &post_state).expect("incremental");
+
+        let (expected_root, _) = compute_state_root_with_updates(&state).expect("expected");
+        assert_eq!(incremental_root, expected_root);
+        assert_ne!(incremental_root, root1, "root should change after destruction");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
