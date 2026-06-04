@@ -12,9 +12,19 @@ use revm::context_interface::journaled_state::account::JournaledAccountTr;
 use revm::context_interface::journaled_state::JournalCheckpoint;
 use revm::context_interface::JournalTr;
 use revm::database_interface::Database;
+use revm::interpreter::gas::{
+    COLD_SLOAD_COST, LOG, LOGDATA, LOGTOPIC, WARM_STORAGE_READ_COST,
+};
 use revm::primitives::Log;
 use revm_precompile::{PrecompileError, PrecompileOutput};
 use std::collections::HashMap;
+
+// Gas constants imported from revm and EIP-1153.
+const SSTORE_SET_GAS: u64 = 20000;
+const TLOAD_GAS: u64 = 100;
+const TSTORE_GAS: u64 = 100;
+const BALANCE_ACCESS_GAS: u64 = WARM_STORAGE_READ_COST;
+const CODE_ACCESS_GAS: u64 = WARM_STORAGE_READ_COST;
 
 // ── Trait ─────────────────────────────────────────────────────────────
 
@@ -47,8 +57,12 @@ pub trait StorageProvider {
     /// Revert changes since the checkpoint.
     fn checkpoint_revert(&mut self, checkpoint: JournalCheckpoint);
 
-    /// Deduct gas. Returns `OutOfGas` if insufficient.
-    fn deduct_gas(&mut self, gas: u64) -> Result<(), PrecompileError>;
+    /// Charge gas for compute work not covered by storage operations.
+    ///
+    /// Precompiles use this to declare dynamic compute costs (e.g. ZK proof
+    /// verification, batch transfer processing, nested EVM gas). Storage reads
+    /// and writes are charged automatically by the provider.
+    fn charge_gas(&mut self, gas: u64) -> Result<(), PrecompileError>;
 
     /// Add gas refund.
     fn refund_gas(&mut self, gas: i64);
@@ -146,6 +160,15 @@ impl<'a, J: JournalTr> EvmStorageProvider<'a, J> {
             sstore_count: 0,
         }
     }
+
+    /// Internal gas deduction used by storage operations.
+    fn deduct_gas(&mut self, gas: u64) -> Result<(), PrecompileError> {
+        self.gas_remaining = self
+            .gas_remaining
+            .checked_sub(gas)
+            .ok_or(PrecompileError::OutOfGas)?;
+        Ok(())
+    }
 }
 
 impl<'a, J: JournalTr> StorageProvider for EvmStorageProvider<'a, J>
@@ -164,8 +187,11 @@ where
             .journal
             .sload(address, key)
             .map_err(|e| PrecompileError::Other(format!("sload error: {:?}", e).into()))?;
-        // Cancun: warm = 100, cold = 2100
-        let gas = if result.is_cold { 2100 } else { 100 };
+        let gas = if result.is_cold {
+            COLD_SLOAD_COST
+        } else {
+            WARM_STORAGE_READ_COST
+        };
         self.deduct_gas(gas)?;
         Ok(result.data)
     }
@@ -186,11 +212,10 @@ where
             .journal
             .sstore(address, key, value)
             .map_err(|e| PrecompileError::Other(format!("sstore error: {:?}", e).into()))?;
-        // Cancun SSTORE gas accounting (simplified but safe upper bound)
-        let static_gas = 20000u64;
-        let dynamic_gas = if result.is_cold { 2100 } else { 0 };
-        let total = static_gas + dynamic_gas;
-        self.deduct_gas(total)?;
+        // Use SSTORE_SET as a safe upper bound; add cold-access cost when applicable.
+        let static_gas = SSTORE_SET_GAS;
+        let dynamic_gas = if result.is_cold { COLD_SLOAD_COST } else { 0 };
+        self.deduct_gas(static_gas + dynamic_gas)?;
 
         // Refunds (Cancun rules, simplified)
         let s = &result.data;
@@ -203,7 +228,7 @@ where
     }
 
     fn tload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError> {
-        self.deduct_gas(100)?; // TLOAD = warm read
+        self.deduct_gas(TLOAD_GAS)?;
         Ok(self.journal.tload(address, key))
     }
 
@@ -213,15 +238,15 @@ where
                 "static call cannot mutate state".into(),
             ));
         }
-        self.deduct_gas(100)?; // TSTORE = warm write
+        self.deduct_gas(TSTORE_GAS)?;
         self.journal.tstore(address, key, value);
         Ok(())
     }
 
     fn emit_event(&mut self, address: Address, event: LogData) -> Result<(), PrecompileError> {
-        let topics_gas = 375u64 * event.topics().len() as u64;
-        let data_gas = 8u64 * event.data.len() as u64;
-        self.deduct_gas(375 + topics_gas + data_gas)?;
+        let topics_gas = LOGTOPIC * event.topics().len() as u64;
+        let data_gas = LOGDATA * event.data.len() as u64;
+        self.deduct_gas(LOG + topics_gas + data_gas)?;
         self.journal.log(Log {
             address,
             data: event,
@@ -241,12 +266,8 @@ where
         self.journal.checkpoint_revert(checkpoint);
     }
 
-    fn deduct_gas(&mut self, gas: u64) -> Result<(), PrecompileError> {
-        self.gas_remaining = self
-            .gas_remaining
-            .checked_sub(gas)
-            .ok_or(PrecompileError::OutOfGas)?;
-        Ok(())
+    fn charge_gas(&mut self, gas: u64) -> Result<(), PrecompileError> {
+        self.deduct_gas(gas)
     }
 
     fn refund_gas(&mut self, gas: i64) {
@@ -296,7 +317,7 @@ where
         if !success {
             return Err(PrecompileError::Other("balance overflow".into()));
         }
-        self.deduct_gas(100)
+        self.deduct_gas(BALANCE_ACCESS_GAS)
     }
 
     fn balance_sub(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError> {
@@ -314,7 +335,7 @@ where
         if !success {
             return Err(PrecompileError::Other("insufficient native balance".into()));
         }
-        self.deduct_gas(100)
+        self.deduct_gas(BALANCE_ACCESS_GAS)
     }
 
     fn balance_get(&mut self, address: Address) -> Result<U256, PrecompileError> {
@@ -324,7 +345,7 @@ where
             })?;
             account.data.info.balance
         };
-        self.deduct_gas(100)?;
+        self.deduct_gas(BALANCE_ACCESS_GAS)?;
         Ok(balance)
     }
 
@@ -341,7 +362,7 @@ where
                 .map(|c| c.original_bytes())
                 .unwrap_or_default()
         };
-        self.deduct_gas(100)?;
+        self.deduct_gas(CODE_ACCESS_GAS)?;
         Ok(code)
     }
 
@@ -544,11 +565,26 @@ impl HashMapStorageProvider {
     }
 }
 
+impl HashMapStorageProvider {
+    /// Internal gas deduction used by storage operations.
+    fn deduct_gas(&mut self, gas: u64) -> Result<(), PrecompileError> {
+        self.gas_remaining = self
+            .gas_remaining
+            .checked_sub(gas)
+            .ok_or(PrecompileError::OutOfGas)?;
+        Ok(())
+    }
+}
+
 impl StorageProvider for HashMapStorageProvider {
     fn sload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError> {
         self.sload_count += 1;
         let is_warm = self.is_warm(address, key);
-        let gas = if is_warm { 100 } else { 2100 };
+        let gas = if is_warm {
+            WARM_STORAGE_READ_COST
+        } else {
+            COLD_SLOAD_COST
+        };
         self.deduct_gas(gas)?;
         self.warm_slot(address, key);
         Ok(self
@@ -564,8 +600,8 @@ impl StorageProvider for HashMapStorageProvider {
             return Err(PrecompileError::Other("static call".into()));
         }
         let is_warm = self.is_warm(address, key);
-        let static_gas = 20000u64;
-        let dynamic_gas = if is_warm { 0 } else { 2100 };
+        let static_gas = SSTORE_SET_GAS;
+        let dynamic_gas = if is_warm { 0 } else { COLD_SLOAD_COST };
         self.deduct_gas(static_gas + dynamic_gas)?;
 
         let present = self
@@ -590,7 +626,7 @@ impl StorageProvider for HashMapStorageProvider {
     }
 
     fn tload(&mut self, address: Address, key: U256) -> Result<U256, PrecompileError> {
-        self.deduct_gas(100)?;
+        self.deduct_gas(TLOAD_GAS)?;
         Ok(self
             .transient
             .get(&(address, key))
@@ -602,15 +638,15 @@ impl StorageProvider for HashMapStorageProvider {
         if self.is_static {
             return Err(PrecompileError::Other("static call".into()));
         }
-        self.deduct_gas(100)?;
+        self.deduct_gas(TSTORE_GAS)?;
         self.transient.insert((address, key), value);
         Ok(())
     }
 
     fn emit_event(&mut self, address: Address, event: LogData) -> Result<(), PrecompileError> {
-        let topics_gas = 375u64 * event.topics().len() as u64;
-        let data_gas = 8u64 * event.data.len() as u64;
-        self.deduct_gas(375 + topics_gas + data_gas)?;
+        let topics_gas = LOGTOPIC * event.topics().len() as u64;
+        let data_gas = LOGDATA * event.data.len() as u64;
+        self.deduct_gas(LOG + topics_gas + data_gas)?;
         self.events.entry(address).or_default().push(event);
         Ok(())
     }
@@ -662,12 +698,8 @@ impl StorageProvider for HashMapStorageProvider {
         }
     }
 
-    fn deduct_gas(&mut self, gas: u64) -> Result<(), PrecompileError> {
-        self.gas_remaining = self
-            .gas_remaining
-            .checked_sub(gas)
-            .ok_or(PrecompileError::OutOfGas)?;
-        Ok(())
+    fn charge_gas(&mut self, gas: u64) -> Result<(), PrecompileError> {
+        self.deduct_gas(gas)
     }
 
     fn refund_gas(&mut self, gas: i64) {
@@ -713,7 +745,7 @@ impl StorageProvider for HashMapStorageProvider {
             .checked_add(amount)
             .ok_or_else(|| PrecompileError::Other("balance overflow".into()))?;
         self.balances.insert(address, new);
-        self.deduct_gas(100)
+        self.deduct_gas(BALANCE_ACCESS_GAS)
     }
 
     fn balance_sub(&mut self, address: Address, amount: U256) -> Result<(), PrecompileError> {
@@ -727,16 +759,16 @@ impl StorageProvider for HashMapStorageProvider {
             .checked_sub(amount)
             .ok_or_else(|| PrecompileError::Other("insufficient native balance".into()))?;
         self.balances.insert(address, new);
-        self.deduct_gas(100)
+        self.deduct_gas(BALANCE_ACCESS_GAS)
     }
 
     fn balance_get(&mut self, address: Address) -> Result<U256, PrecompileError> {
-        self.deduct_gas(100)?;
+        self.deduct_gas(BALANCE_ACCESS_GAS)?;
         Ok(self.balances.get(&address).copied().unwrap_or_default())
     }
 
     fn code_get(&mut self, address: Address) -> Result<alloy_primitives::Bytes, PrecompileError> {
-        self.deduct_gas(100)?;
+        self.deduct_gas(CODE_ACCESS_GAS)?;
         Ok(self.codes.get(&address).cloned().unwrap_or_default())
     }
 

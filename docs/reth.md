@@ -17,7 +17,7 @@
 | **Proof 支持** | `eth_getProof` 真 Merkle Proof | `eth_getProof` 真 Merkle Proof | ✅ `eth_getProof` 从持久化 trie 节点读取 | `eth_getProof` 真 Merkle Proof |
 | **共识耦合** | Commonware (外部) | Malachite (外部) | ✅ `Block::execute` 包含所有状态变更，`commit_block` 纯 BFT | 自研共识通过 BlockExecutor |
 | **Precompile 状态访问** | revm JournalTr | revm JournalTr | ✅ `EvmStorageProvider` 直接访问 `JournalTr` | revm JournalTr |
-| **Gas 管理** | revm 自动 | revm 自动 | ⚠️ precompile 手动追踪 gas（正确但非自动） | revm 自动 |
+| **Gas 管理** | revm 自动 | revm 自动 | ✅ precompile 存储操作自动计费，外部计算通过 `charge_gas` 声明 | revm 自动 |
 
 **关键结论**：P0（执行层+状态存储）、P1（历史状态+Proof）和 P2（BlockExecutor 与共识解耦）均已完成。
 
@@ -94,13 +94,15 @@ call-node 当前使用自定义 `CallchainBlockExecutor` trait（`crates/evm/src
 
 ### Feature 1：Precompile Gas 自动计费
 
-**状态**：⚠️ 当前 precompile 通过 `StorageProvider::deduct_gas()` 手动追踪 gas。
+**状态**：✅ 已实现（方案一）。
 
-**背景**：`EvmStorageProvider` 已直接调用 `journal.sload()`/`journal.sstore()`，revm 正确记录存储访问并可 revert。但 gas 计费是手动的（warm/cold SLOAD/SSTORE 定价），而非由 revm 解释器自动扣除。
+**实现方式**：
+- 从 `StorageProvider` trait 中移除 `deduct_gas`，改为内部私有方法，仅供存储操作自动调用。
+- `sload`/`sstore`/`tload`/`tstore`/`log`/`balance_*`/`code_get` 等操作自动按 revm 常量（EIP-2929、EIP-1153、EIP-2200）扣除 warm/cold 费用。
+- 引入 `StorageProvider::charge_gas(gas)` 作为公共接口，供外部计算成本（ZK 证明、嵌套 EVM、批量转账）声明式计费。
+- `dispatch::{view, mutate}` 中不再手动计算 `SLOAD_DISPATCH_COST`/`SSTORE_DISPATCH_COST`，直接调用 `storage.charge_gas(gas)` 扣除基础计算 gas。
 
-**原因**：revm 的 precompile 接口是黑盒（input + gas_limit → output + gas_used），解释器无法在 precompile 执行期间自动计费内部存储访问。这与 tempo、arc-node 的做法一致。
-
-**何时需要**：当 precompile gas 计费需要与 EVM 解释器完全统一时（例如支持 EIP-2929 动态 warm/cold 定价的自动传播）。
+**背景**：`EvmStorageProvider` 已直接调用 `journal.sload()`/`journal.sstore()`，revm 正确记录存储访问并可 revert。此前 gas 计费是手动的（每次 precompile 调用显式 `deduct_gas`），现已将计费收敛到 `StorageProvider` 内部，precompile 作者无需再手动追踪存储操作 gas。
 
 ### Feature 2：System Contracts
 
@@ -154,7 +156,7 @@ call-node 当前使用自定义 `CallchainBlockExecutor` trait（`crates/evm/src
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
 | 15 | StorageRef → revm JournalTr | ✅ | 所有 precompile 通过 `EvmStorageProvider` 直接访问 revm `JournalTr` |
-| 16 | precompile gas 自动计费 | 🔮 Future | 当前手动 `deduct_gas()` 正确工作；需 revm 架构支持才能完全自动 |
+| 16 | precompile gas 自动计费 | ✅ | 方案一：存储操作内部自动计费，`charge_gas` 供外部计算成本声明式计费 |
 | 17 | System Contract 部署 | 🔮 Future | 长期将协议逻辑从 Rust precompile 迁移为 Solidity system contract |
 
 ---

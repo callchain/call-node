@@ -857,7 +857,7 @@ impl ShieldedPrecompile {
         let proof_len = call.proofData.len() as u64;
         let dynamic_gas = 300_000u64
             .saturating_add(proof_len.saturating_mul(10));
-        storage.deduct_gas(dynamic_gas)?;
+        storage.charge_gas(dynamic_gas)?;
 
         check_compliance(msg_sender, storage)?;
         let current_block = storage.block_number();
@@ -913,7 +913,7 @@ impl ShieldedPrecompile {
         let proof_len = call.proofData.len() as u64;
         let dynamic_gas = 200_000u64
             .saturating_add(proof_len.saturating_mul(10));
-        storage.deduct_gas(dynamic_gas)?;
+        storage.charge_gas(dynamic_gas)?;
 
         check_compliance(call.target, storage)?;
         let current_block = storage.block_number();
@@ -976,7 +976,7 @@ impl ShieldedPrecompile {
             .saturating_add(commitment_count.saturating_mul(20_000))
             .saturating_add(nullifier_count.saturating_mul(10_000))
             .saturating_add(proof_len.saturating_mul(10));
-        storage.deduct_gas(dynamic_gas)?;
+        storage.charge_gas(dynamic_gas)?;
 
         check_compliance(msg_sender, storage)?;
         let current_block = storage.block_number();
@@ -1146,9 +1146,7 @@ impl ShieldedPrecompile {
                     .map_err(|e| PrecompileError::Other(e.to_string().into()))?;
                 let pruned = store.prune_expired_nullifiers(current_block);
                 let prune_gas = 3000u64 + pruned * 500;
-                storage
-                    .deduct_gas(prune_gas)
-                    .map_err(|_| PrecompileError::OutOfGas)?;
+                storage.charge_gas(prune_gas)?;
                 Ok(pruned)
             },
         )

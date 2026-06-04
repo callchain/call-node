@@ -150,7 +150,7 @@ fn execute_static_call(
         revm::context_interface::result::ExecutionResult::Revert { gas, .. } => gas.spent(),
         revm::context_interface::result::ExecutionResult::Halt { gas, .. } => gas.spent(),
     };
-    db.provider.deduct_gas(gas_spent)?;
+    db.provider.charge_gas(gas_spent)?;
 
     match result.result {
         revm::context_interface::result::ExecutionResult::Success { output, .. } => {

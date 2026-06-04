@@ -243,7 +243,7 @@ impl AssetPrecompile {
             .checked_add(EVENT_OVERHEAD_PER_ITEM)
             .and_then(|g| g.checked_mul(call.to.len() as u64))
             .ok_or(PrecompileError::Other("batch gas overflow".into()))?;
-        storage.deduct_gas(total_gas)?;
+        storage.charge_gas(total_gas)?;
 
         let from = require_caller(msg_sender)?;
         require_compliance(from, storage)?;
