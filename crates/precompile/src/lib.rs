@@ -61,7 +61,9 @@ use revm::context::Block;
 use revm::context_interface::cfg::Cfg;
 use revm::context_interface::local::LocalContextTr;
 use revm_precompile::PrecompileSpecId;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::storage::EvmStorageProvider;
 
@@ -109,10 +111,24 @@ pub fn all_precompiles() -> &'static [Address] {
 /// Wraps standard Ethereum precompiles with Callchain custom precompiles.
 /// Custom precompiles are executed through revm's normal call-frame mechanism
 /// with [`EvmStorageProvider`] giving them access to the live journal.
+///
+/// Precompile instances are reference-counted so the entire set can be cheaply
+/// cloned and reused across transactions (avoids re-allocating 9 Boxes per tx).
+#[derive(Clone)]
 pub struct CallPrecompiles {
     standard: revm_precompile::Precompiles,
-    custom: HashMap<Address, Box<dyn StatefulPrecompile>>,
+    custom: HashMap<Address, Rc<RefCell<dyn StatefulPrecompile>>>,
     spec: revm::primitives::hardfork::SpecId,
+}
+
+impl std::fmt::Debug for CallPrecompiles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallPrecompiles")
+            .field("standard", &self.standard)
+            .field("custom_count", &self.custom.len())
+            .field("spec", &self.spec)
+            .finish()
+    }
 }
 
 impl CallPrecompiles {
@@ -131,7 +147,7 @@ impl CallPrecompiles {
     pub fn with_custom(
         mut self,
         address: Address,
-        precompile: Box<dyn StatefulPrecompile>,
+        precompile: Rc<RefCell<dyn StatefulPrecompile>>,
     ) -> Self {
         self.custom.insert(address, precompile);
         self
@@ -164,7 +180,7 @@ impl<CTX: revm::context::ContextTr> revm::handler::PrecompileProvider<CTX> for C
     ) -> Result<Option<Self::Output>, String> {
         let address = inputs.bytecode_address;
         // Try custom precompiles first
-        if let Some(precompile) = self.custom.get_mut(&address) {
+        if let Some(precompile) = self.custom.get(&address) {
             let mut result = revm::interpreter::InterpreterResult {
                 result: revm::interpreter::InstructionResult::Return,
                 gas: revm::interpreter::Gas::new(inputs.gas_limit),
@@ -199,7 +215,7 @@ impl<CTX: revm::context::ContextTr> revm::handler::PrecompileProvider<CTX> for C
                 beneficiary,
             );
 
-            let exec_result = precompile.call(&input_bytes, inputs.caller, &mut provider);
+            let exec_result = precompile.borrow_mut().call(&input_bytes, inputs.caller, &mut provider);
 
             match exec_result {
                 Ok(output) => {
