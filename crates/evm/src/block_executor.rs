@@ -16,9 +16,7 @@ use call_protocol::CALL_ASSET_ID;
 use revm::database::{AccountState, CacheDB};
 use revm::database_interface::{DatabaseCommit, DatabaseRef};
 
-use crate::{
-    provider::InMemoryStateProvider, BlockGasTracker, EvmError, EvmExecutor, EvmTransaction,
-};
+use crate::{BlockGasTracker, EvmError, EvmExecutor, EvmTransaction};
 
 /// Result of executing all EVM transactions in a block.
 #[derive(Debug, Default)]
@@ -42,21 +40,28 @@ pub struct BlockTxEntry {
 }
 
 /// Execute every EVM transaction in `evm_txs` against a `CacheDB` backed by
-/// `StateProviderDatabase<InMemoryStateProvider>`.
+/// any provider implementing [`reth_revm::database::EvmStateProvider`].
 ///
 /// # Flow
-/// 1. Create `InMemoryStateProvider` from MDBX (loads full state snapshot).
-/// 2. Wrap it in `StateProviderDatabase` → `CacheDB`.
-/// 3. Decode, validate, and execute each tx on the `CacheDB`.
-/// 4. Return the collected results **and** the raw revm `EvmState` delta.
+/// 1. Wrap `provider` in `StateProviderDatabase` → `CacheDB`.
+/// 2. Decode, validate, and execute each tx on the `CacheDB`.
+/// 3. Return the collected results **and** the raw revm `EvmState` delta.
 ///
 /// The caller must commit the delta to persistent storage (MDBX).
-pub fn execute_block_transactions(
+///
+/// # Type Parameters
+/// - `SP`: Any type implementing [`reth_revm::database::EvmStateProvider`].
+///   Production can pass `InMemoryStateProvider` (full load) or
+///   `LazyStateProvider` (on-demand) to avoid loading the entire state.
+pub fn execute_block_transactions<SP>(
     evm_txs: &[Vec<u8>],
-    provider: InMemoryStateProvider,
+    provider: SP,
     block_number: u64,
     base_fee: u128,
-) -> Result<(BlockTxResult, revm::state::EvmState), EvmError> {
+) -> Result<(BlockTxResult, revm::state::EvmState), EvmError>
+where
+    SP: reth_revm::database::EvmStateProvider,
+{
     let executor = EvmExecutor::new(1);
     let max_evm_gas = 30_000_000u64;
     let mut gas_tracker = BlockGasTracker::new(max_evm_gas);
@@ -715,5 +720,268 @@ mod tests {
             caller_acc.info.balance,
             U256::from(1_000_000 - 100 - 210_000)
         );
+    }
+
+    #[test]
+    fn test_pre_bridge_insufficient_protocol_balance_skips() {
+        let mut provider = InMemoryStateProvider::new();
+        let caller = test_addr(1);
+        let recipient = test_addr(2);
+
+        let slot = slot_balance(CALL_ASSET_ID, caller);
+        // Protocol balance is only 100, but tx needs 210_000 for gas + 100 value.
+        provider.set_storage(ASSET_ADDRESS, slot, U256::from(100));
+        provider.create_account(ASSET_ADDRESS);
+        provider.create_account(caller);
+        provider.create_account(recipient);
+
+        let tx = EvmTransaction {
+            caller,
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
+            to: Some(recipient),
+            value: U256::from(100),
+            data: alloy_primitives::Bytes::default(),
+            chain_id: 1,
+        };
+
+        let (result, _state) =
+            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0).unwrap();
+
+        // Tx should be skipped because protocol balance is insufficient.
+        assert_eq!(result.evm_tx_count, 0);
+    }
+
+    #[test]
+    fn test_pre_bridge_multiple_txs_cumulative() {
+        let mut provider = InMemoryStateProvider::new();
+        let caller = test_addr(1);
+        let recipient = test_addr(2);
+
+        let slot = slot_balance(CALL_ASSET_ID, caller);
+        provider.set_storage(ASSET_ADDRESS, slot, U256::from(1_000_000));
+        provider.create_account(ASSET_ADDRESS);
+        provider.create_account(caller);
+        provider.create_account(recipient);
+
+        let tx1 = EvmTransaction {
+            caller,
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
+            to: Some(recipient),
+            value: U256::from(50),
+            data: alloy_primitives::Bytes::default(),
+            chain_id: 1,
+        };
+        let tx2 = EvmTransaction {
+            caller,
+            nonce: 1,
+            gas_limit: 21_000,
+            gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
+            to: Some(recipient),
+            value: U256::from(60),
+            data: alloy_primitives::Bytes::default(),
+            chain_id: 1,
+        };
+
+        let (result, state) = execute_block_transactions(
+            &[json_tx(&tx1), json_tx(&tx2)],
+            provider,
+            1,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(result.evm_tx_count, 2);
+
+        // Both txs should have bridge events.
+        for entry in &result.evm_tx_results {
+            let topics: Vec<_> = entry.logs.iter().map(|l| l.topics.first().copied().unwrap_or_default()).collect();
+            assert!(topics.contains(&call_primitives::Hash::from(GAS_BRIDGE_TOPIC0)));
+            assert!(topics.contains(&call_primitives::Hash::from(GAS_BRIDGE_SETTLED_TOPIC0)));
+        }
+
+        // Recipient should have received 50 + 60 = 110.
+        let recipient_acc = state.get(&recipient).expect("recipient in state");
+        assert_eq!(recipient_acc.info.balance, U256::from(110));
+
+        // Protocol balance should be:
+        // initial: 1_000_000
+        // tx1 cost: 50 + 210_000 = 210_050
+        // tx2 cost: 60 + 210_000 = 210_060
+        // total cost: 420_110
+        // remaining: 579_890
+        let asset_acc = state.get(&ASSET_ADDRESS).expect("asset in state");
+        let protocol_balance = asset_acc
+            .storage
+            .get(&slot)
+            .map(|s| s.present_value)
+            .unwrap_or_default();
+        assert_eq!(protocol_balance, U256::from(579_890));
+    }
+
+    #[test]
+    fn test_gas_bridge_event_order() {
+        let mut provider = InMemoryStateProvider::new();
+        let caller = test_addr(1);
+        let recipient = test_addr(2);
+
+        let slot = slot_balance(CALL_ASSET_ID, caller);
+        provider.set_storage(ASSET_ADDRESS, slot, U256::from(1_000_000));
+        provider.create_account(ASSET_ADDRESS);
+        provider.create_account(caller);
+        provider.create_account(recipient);
+
+        let tx = EvmTransaction {
+            caller,
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
+            to: Some(recipient),
+            value: U256::from(100),
+            data: alloy_primitives::Bytes::default(),
+            chain_id: 1,
+        };
+
+        let (result, _state) =
+            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0).unwrap();
+
+        let logs = &result.evm_tx_results[0].logs;
+        let bridge_idx = logs.iter().position(|l| {
+            l.topics.first() == Some(&call_primitives::Hash::from(GAS_BRIDGE_TOPIC0))
+        });
+        let settled_idx = logs.iter().position(|l| {
+            l.topics.first() == Some(&call_primitives::Hash::from(GAS_BRIDGE_SETTLED_TOPIC0))
+        });
+
+        assert!(bridge_idx.is_some(), "GasBridge event must be present");
+        assert!(
+            settled_idx.is_some(),
+            "GasBridgeSettled event must be present"
+        );
+        assert!(
+            bridge_idx.unwrap() < settled_idx.unwrap(),
+            "GasBridge must come before GasBridgeSettled"
+        );
+    }
+
+    #[test]
+    fn test_pre_bridge_borrowed_amount_exact() {
+        let mut provider = InMemoryStateProvider::new();
+        let caller = test_addr(1);
+        let recipient = test_addr(2);
+
+        let slot = slot_balance(CALL_ASSET_ID, caller);
+        // Native balance: 50, tx needs: 100 value + 210_000 gas = 210_100
+        // Borrowed should be: 210_100 - 50 = 210_050
+        provider.set_balance(caller, U256::from(50));
+        provider.set_storage(ASSET_ADDRESS, slot, U256::from(1_000_000));
+        provider.create_account(ASSET_ADDRESS);
+        provider.create_account(caller);
+        provider.create_account(recipient);
+
+        let tx = EvmTransaction {
+            caller,
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
+            to: Some(recipient),
+            value: U256::from(100),
+            data: alloy_primitives::Bytes::default(),
+            chain_id: 1,
+        };
+
+        let (result, state) =
+            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0).unwrap();
+
+        assert_eq!(result.evm_tx_count, 1);
+
+        // Verify protocol balance reflects exact borrowed amount.
+        // initial: 1_000_000, borrowed: 210_050, spent: 210_050 (all gas + value)
+        let asset_acc = state.get(&ASSET_ADDRESS).expect("asset in state");
+        let protocol_balance = asset_acc
+            .storage
+            .get(&slot)
+            .map(|s| s.present_value)
+            .unwrap_or_default();
+        assert_eq!(protocol_balance, U256::from(1_000_000 - 210_050));
+
+        // Verify GasBridge event data contains the exact borrowed amount.
+        let bridge_log = result.evm_tx_results[0]
+            .logs
+            .iter()
+            .find(|l| {
+                l.topics.first()
+                    == Some(&call_primitives::Hash::from(GAS_BRIDGE_TOPIC0))
+            })
+            .expect("GasBridge log must exist");
+        let borrowed_from_log = U256::from_be_slice(&bridge_log.data[0..32]);
+        assert_eq!(borrowed_from_log, U256::from(210_050));
+    }
+
+    #[test]
+    fn test_lazy_provider_in_block_execution() {
+        use crate::provider::LazyStateProvider;
+        use std::sync::Arc;
+
+        let tmp = std::env::temp_dir()
+            .join(format!("call-lazy-block-exec-test-{}", std::process::id()));
+        let db = call_storage::reth_db::init_call_db(&tmp).expect("init db");
+
+        // Seed MDBX with state via InMemoryStateProvider
+        let mut seed = InMemoryStateProvider::new();
+        let caller = test_addr(1);
+        let recipient = test_addr(2);
+        seed.set_balance(caller, U256::from(1_000_000));
+        seed.create_account(caller);
+        seed.create_account(recipient);
+        seed.save_to_db(&db).expect("seed db");
+
+        // Use LazyStateProvider — should NOT load full state at construction
+        let lazy = LazyStateProvider::new(Arc::clone(&db));
+
+        let tx = EvmTransaction {
+            caller,
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
+            to: Some(recipient),
+            value: U256::from(100),
+            data: alloy_primitives::Bytes::default(),
+            chain_id: 1,
+        };
+
+        // execute_block_transactions now accepts any EvmStateProvider
+        let (result, state) =
+            execute_block_transactions(&[json_tx(&tx)], lazy, 1, 0).unwrap();
+
+        assert_eq!(result.evm_tx_count, 1);
+        assert!(result.evm_tx_results[0].status);
+
+        // Verify state delta is correct
+        let caller_acc = state.get(&caller).expect("caller in state");
+        assert_eq!(
+            caller_acc.info.balance,
+            U256::from(1_000_000 - 100 - 210_000)
+        );
+
+        let recipient_acc = state.get(&recipient).expect("recipient in state");
+        assert_eq!(recipient_acc.info.balance, U256::from(100));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

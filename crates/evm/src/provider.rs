@@ -279,11 +279,12 @@ impl InMemoryStateProvider {
 ///
 /// This is the preferred provider for read-heavy RPC and consensus paths
 /// where only a small subset of state is touched.
+#[derive(Clone)]
 pub struct LazyStateProvider {
     db: Arc<DatabaseEnv>,
-    cache: std::sync::RwLock<HashMap<Address, EvmAccount>>,
-    code_cache: std::sync::RwLock<HashMap<B256, Bytes>>,
-    block_hashes: std::sync::RwLock<HashMap<BlockNumber, B256>>,
+    cache: Arc<std::sync::RwLock<HashMap<Address, EvmAccount>>>,
+    code_cache: Arc<std::sync::RwLock<HashMap<B256, Bytes>>>,
+    block_hashes: Arc<std::sync::RwLock<HashMap<BlockNumber, B256>>>,
 }
 
 impl core::fmt::Debug for LazyStateProvider {
@@ -311,9 +312,9 @@ impl LazyStateProvider {
     pub fn new(db: Arc<DatabaseEnv>) -> Self {
         Self {
             db,
-            cache: std::sync::RwLock::new(HashMap::new()),
-            code_cache: std::sync::RwLock::new(HashMap::new()),
-            block_hashes: std::sync::RwLock::new(HashMap::new()),
+            cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            code_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            block_hashes: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 
