@@ -4,6 +4,7 @@
 
 pub mod backend;
 pub mod block_executor;
+pub mod codec;
 pub mod db;
 pub mod erc20_bytecode;
 mod executor;

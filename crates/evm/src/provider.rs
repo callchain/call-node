@@ -76,10 +76,10 @@ impl InMemoryStateProvider {
                 continue;
             }
             let addr = Address::from_slice(&key);
-            let account: EvmAccount = serde_json::from_slice(&value).map_err(|e| {
-                ProviderError::Database(reth_db::DatabaseError::Other(format!(
-                    "deserialize account: {e}"
-                )))
+            let account = crate::codec::decode_account(&value).ok_or_else(|| {
+                ProviderError::Database(reth_db::DatabaseError::Other(
+                    "deserialize account failed".into(),
+                ))
             })?;
             accounts.insert(addr, account);
         }
@@ -93,10 +93,10 @@ impl InMemoryStateProvider {
                 ProviderError::Database(reth_db::DatabaseError::Other("invalid storage key".into()))
             })?;
             let slot = U256::from_be_bytes(slot_bytes);
-            let slot_value: U256 = serde_json::from_slice(&value).map_err(|e| {
-                ProviderError::Database(reth_db::DatabaseError::Other(format!(
-                    "deserialize storage: {e}"
-                )))
+            let slot_value = crate::codec::decode_u256(&value).ok_or_else(|| {
+                ProviderError::Database(reth_db::DatabaseError::Other(
+                    "deserialize storage failed".into(),
+                ))
             })?;
 
             if let Some(acc) = accounts.get_mut(&addr) {
@@ -121,7 +121,7 @@ impl InMemoryStateProvider {
             .iter()
             .map(|(addr, acc)| {
                 let key = addr.as_slice().to_vec();
-                let value = serde_json::to_vec(acc).unwrap_or_default();
+                let value = crate::codec::encode_account(acc);
                 (key, value)
             })
             .collect();
@@ -142,7 +142,7 @@ impl InMemoryStateProvider {
                 let mut key = Vec::with_capacity(52);
                 key.extend_from_slice(addr.as_slice());
                 key.extend_from_slice(&slot.to_be_bytes::<32>());
-                let value_bytes = serde_json::to_vec(value).unwrap_or_default();
+                let value_bytes = crate::codec::encode_u256(value);
                 storage.push((key, value_bytes));
             }
         }
@@ -338,10 +338,10 @@ impl LazyStateProvider {
         .map_err(|e| {
             ProviderError::Database(reth_db::DatabaseError::Other(format!("db_get: {e}")))
         })? {
-            Some(bytes) => Some(serde_json::from_slice(&bytes).map_err(|e| {
-                ProviderError::Database(reth_db::DatabaseError::Other(format!(
-                    "deserialize account: {e}"
-                )))
+            Some(bytes) => Some(crate::codec::decode_account(&bytes).ok_or_else(|| {
+                ProviderError::Database(reth_db::DatabaseError::Other(
+                    "deserialize account failed".into(),
+                ))
             })?),
             None => None,
         };
@@ -383,10 +383,10 @@ impl LazyStateProvider {
             .map_err(|e| {
                 ProviderError::Database(reth_db::DatabaseError::Other(format!("db_get: {e}")))
             })? {
-                Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
-                    ProviderError::Database(reth_db::DatabaseError::Other(format!(
-                        "deserialize storage: {e}"
-                    )))
+                Some(bytes) => crate::codec::decode_u256(&bytes).ok_or_else(|| {
+                    ProviderError::Database(reth_db::DatabaseError::Other(
+                        "deserialize storage failed".into(),
+                    ))
                 })?,
                 None => U256::ZERO,
             };

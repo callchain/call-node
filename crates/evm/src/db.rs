@@ -55,8 +55,12 @@ impl DatabaseRef for EvmDb {
         let key = address.as_slice().to_vec();
         match db_get::<CallEvmAccounts>(&self.db, &key).map_err(ErasedError::new)? {
             Some(bytes) => {
-                let account: EvmAccount =
-                    serde_json::from_slice(&bytes).map_err(ErasedError::new)?;
+                let account = crate::codec::decode_account(&bytes).ok_or_else(|| {
+                    ErasedError::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "decode account failed",
+                    ))
+                })?;
                 let code = if account.code.is_empty() {
                     None
                 } else {
@@ -83,7 +87,12 @@ impl DatabaseRef for EvmDb {
         key.extend_from_slice(&index.to_be_bytes::<32>());
         match db_get::<CallEvmStorage>(&self.db, &key).map_err(ErasedError::new)? {
             Some(bytes) => {
-                let value: U256 = serde_json::from_slice(&bytes).map_err(ErasedError::new)?;
+                let value = crate::codec::decode_u256(&bytes).ok_or_else(|| {
+                    ErasedError::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "decode storage failed",
+                    ))
+                })?;
                 Ok(value)
             }
             None => Ok(U256::ZERO),
@@ -166,7 +175,7 @@ pub fn apply_revm_state_to_mdbx(
         };
         accounts.push((
             addr.as_slice().to_vec(),
-            serde_json::to_vec(&evm_account).unwrap_or_default(),
+            crate::codec::encode_account(&evm_account),
         ));
 
         // Collect storage slots
@@ -175,7 +184,7 @@ pub fn apply_revm_state_to_mdbx(
             let mut key = Vec::with_capacity(52);
             key.extend_from_slice(addr.as_slice());
             key.extend_from_slice(&slot.to_be_bytes::<32>());
-            let value_bytes = serde_json::to_vec(&slot_value).unwrap_or_default();
+            let value_bytes = crate::codec::encode_u256(&slot_value);
             storage.push((key, value_bytes));
         }
     }
@@ -233,7 +242,7 @@ pub fn record_revm_delta_history(
         let mut key = Vec::with_capacity(28);
         key.extend_from_slice(addr.as_slice());
         key.extend_from_slice(&block_be);
-        let value = serde_json::to_vec(&evm_account).unwrap_or_default();
+        let value = crate::codec::encode_account(&evm_account);
         db_put::<CallAccountHistory>(db, key, value).map_err(ErasedError::new)?;
 
         // Record each changed storage slot
@@ -243,7 +252,7 @@ pub fn record_revm_delta_history(
             key.extend_from_slice(addr.as_slice());
             key.extend_from_slice(&slot.to_be_bytes::<32>());
             key.extend_from_slice(&block_be);
-            let value_bytes = serde_json::to_vec(&slot_value).unwrap_or_default();
+            let value_bytes = crate::codec::encode_u256(&slot_value);
             db_put::<CallStorageHistory>(db, key, value_bytes).map_err(ErasedError::new)?;
         }
     }
@@ -283,7 +292,12 @@ pub fn get_historical_account(
             if value.is_empty() {
                 return Ok(None); // account was destroyed
             }
-            let account: EvmAccount = serde_json::from_slice(&value).map_err(ErasedError::new)?;
+            let account = crate::codec::decode_account(&value).ok_or_else(|| {
+                ErasedError::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "decode historical account failed",
+                ))
+            })?;
             return Ok(Some(account));
         }
     }
@@ -323,7 +337,12 @@ pub fn get_historical_storage(
             && &key[..20] == address.as_slice()
             && &key[20..52] == slot.to_be_bytes::<32>()
         {
-            let val: U256 = serde_json::from_slice(&value).map_err(ErasedError::new)?;
+            let val = crate::codec::decode_u256(&value).ok_or_else(|| {
+                ErasedError::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "decode historical storage failed",
+                ))
+            })?;
             return Ok(val);
         }
     }
