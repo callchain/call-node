@@ -116,35 +116,40 @@ impl DatabaseRef for EvmDb {
 /// This is used after executing a transaction with [`CacheDB<EvmDb>`] —
 /// the revm [`EvmState`] delta is written straight to persistent storage
 /// without ever materialising a full in-memory [`InMemoryStateProvider`].
+///
+/// All changes are collected in-memory first and committed in a **single**
+/// MDBX transaction to avoid per-write fsync overhead.
 pub fn apply_revm_state_to_mdbx(
     db: &DatabaseEnv,
     revm_state: &revm::state::EvmState,
 ) -> Result<(), ErasedError> {
+    let mut accounts = Vec::new();
+    let mut storage = Vec::new();
+    let mut bytecodes = Vec::new();
+    let mut deleted_accounts = Vec::new();
+
     for (addr, account) in revm_state {
         if !account.is_touched() {
             continue;
         }
 
         if account.is_selfdestructed() {
-            // Remove account and all its storage
-            let key = addr.as_slice().to_vec();
-            call_storage::reth_db::db_del::<CallEvmAccounts>(db, &key).map_err(ErasedError::new)?;
+            deleted_accounts.push(addr.as_slice().to_vec());
             // Note: we don't have a range-delete for storage; in production
             // this would require iterating all slots for this address.
             continue;
         }
 
-        // Upsert bytecode table (keyed by code_hash)
+        // Collect bytecode
         if let Some(c) = &account.info.code {
             let code = c.original_bytes();
             if !code.is_empty() {
                 let code_hash = c.hash_slow();
-                call_storage::reth_db::save_bytecode(db, &code_hash, &code)
-                    .map_err(ErasedError::new)?;
+                bytecodes.push((code_hash.as_slice().to_vec(), code.as_ref().to_vec()));
             }
         }
 
-        // Upsert account info
+        // Collect account info
         let mut code = alloy_primitives::Bytes::default();
         if let Some(c) = &account.info.code {
             code = c.original_bytes();
@@ -159,22 +164,25 @@ pub fn apply_revm_state_to_mdbx(
                 .map(|(k, v)| (*k, v.present_value()))
                 .collect(),
         };
-        let key = addr.as_slice().to_vec();
-        let value = serde_json::to_vec(&evm_account).unwrap_or_default();
-        call_storage::reth_db::db_put::<CallEvmAccounts>(db, key, value)
-            .map_err(ErasedError::new)?;
+        accounts.push((
+            addr.as_slice().to_vec(),
+            serde_json::to_vec(&evm_account).unwrap_or_default(),
+        ));
 
-        // Upsert each storage slot individually
+        // Collect storage slots
         for (slot, value) in &account.storage {
             let slot_value = value.present_value();
             let mut key = Vec::with_capacity(52);
             key.extend_from_slice(addr.as_slice());
             key.extend_from_slice(&slot.to_be_bytes::<32>());
             let value_bytes = serde_json::to_vec(&slot_value).unwrap_or_default();
-            call_storage::reth_db::db_put::<CallEvmStorage>(db, key, value_bytes)
-                .map_err(ErasedError::new)?;
+            storage.push((key, value_bytes));
         }
     }
+
+    call_storage::reth_db::db_commit_state_batch(db, accounts, storage, bytecodes, deleted_accounts)
+        .map_err(ErasedError::new)?;
+
     Ok(())
 }
 

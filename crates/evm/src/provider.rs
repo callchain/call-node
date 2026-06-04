@@ -108,18 +108,15 @@ impl InMemoryStateProvider {
     }
 
     /// Persist full state to MDBX.
+    ///
+    /// Uses a single atomic transaction via `db_replace_full_state`, replacing
+    /// the previous multi-transaction approach (`db_clear` + per-table
+    /// `db_batch_put`) and eliminating multiple `fsync` calls.
     pub fn save_to_db(
         &self,
         db: &DatabaseEnv,
     ) -> Result<(), revm::database_interface::ErasedError> {
-        use call_storage::reth_db::{
-            db_batch_put, db_clear, CallBytecodes, CallEvmAccounts, CallEvmStorage,
-        };
-
-        db_clear::<CallEvmAccounts>(db).map_err(revm::database_interface::ErasedError::new)?;
-        db_clear::<CallEvmStorage>(db).map_err(revm::database_interface::ErasedError::new)?;
-
-        let account_entries: Vec<(Vec<u8>, Vec<u8>)> = self
+        let accounts: Vec<(Vec<u8>, Vec<u8>)> = self
             .accounts
             .iter()
             .map(|(addr, acc)| {
@@ -128,37 +125,30 @@ impl InMemoryStateProvider {
                 (key, value)
             })
             .collect();
-        if !account_entries.is_empty() {
-            db_batch_put::<CallEvmAccounts>(db, account_entries)
-                .map_err(revm::database_interface::ErasedError::new)?;
-        }
 
-        // Persist bytecodes keyed by code_hash for code_by_hash_ref lookups
+        let mut bytecodes = Vec::new();
         for (_addr, acc) in &self.accounts {
             if !acc.code.is_empty() {
                 let code_hash = alloy_primitives::keccak256(&acc.code);
                 let key = code_hash.as_slice().to_vec();
                 let value = acc.code.as_ref().to_vec();
-                db_batch_put::<CallBytecodes>(db, vec![(key, value)])
-                    .map_err(revm::database_interface::ErasedError::new)?;
+                bytecodes.push((key, value));
             }
         }
 
-        let mut storage_entries = Vec::new();
+        let mut storage = Vec::new();
         for (addr, acc) in &self.accounts {
             for (slot, value) in &acc.storage {
                 let mut key = Vec::with_capacity(52);
                 key.extend_from_slice(addr.as_slice());
                 key.extend_from_slice(&slot.to_be_bytes::<32>());
                 let value_bytes = serde_json::to_vec(value).unwrap_or_default();
-                storage_entries.push((key, value_bytes));
+                storage.push((key, value_bytes));
             }
         }
-        if !storage_entries.is_empty() {
-            db_batch_put::<CallEvmStorage>(db, storage_entries)
-                .map_err(revm::database_interface::ErasedError::new)?;
-        }
 
+        call_storage::reth_db::db_replace_full_state(db, accounts, storage, bytecodes)
+            .map_err(revm::database_interface::ErasedError::new)?;
         Ok(())
     }
 

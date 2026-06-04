@@ -477,6 +477,131 @@ pub fn db_clear<T: Table<Key = Vec<u8>, Value = Vec<u8>>>(
     Ok(())
 }
 
+/// Atomically apply a batch of writes across multiple tables in a single
+/// MDBX transaction.
+///
+/// This is the **production path** for committing block state. Calling
+/// `db_batch_put` separately for each table incurs one `fsync` per table;
+/// this function performs all writes and a single `fsync` at the end.
+///
+/// # Ordering
+/// 1. Delete `deleted_accounts` from `CallEvmAccounts`.
+/// 2. Upsert `accounts` into `CallEvmAccounts`.
+/// 3. Upsert `storage` into `CallEvmStorage`.
+/// 4. Upsert `bytecodes` into `CallBytecodes`.
+pub fn db_commit_state_batch(
+    db: &DatabaseEnv,
+    accounts: Vec<(Vec<u8>, Vec<u8>)>,
+    storage: Vec<(Vec<u8>, Vec<u8>)>,
+    bytecodes: Vec<(Vec<u8>, Vec<u8>)>,
+    deleted_accounts: Vec<Vec<u8>>,
+) -> Result<(), StorageError> {
+    let tx = db.tx_mut().map_err(db_err)?;
+
+    // 1. Delete destroyed accounts
+    {
+        let mut cursor = tx.cursor_write::<CallEvmAccounts>().map_err(db_err)?;
+        for key in deleted_accounts {
+            if cursor.seek_exact(key).map_err(db_err)?.is_some() {
+                cursor.delete_current().map_err(db_err)?;
+            }
+        }
+    }
+
+    // 2. Upsert accounts
+    {
+        let mut cursor = tx.cursor_write::<CallEvmAccounts>().map_err(db_err)?;
+        for (key, value) in accounts {
+            cursor.upsert(key, &value).map_err(db_err)?;
+        }
+    }
+
+    // 3. Upsert storage
+    {
+        let mut cursor = tx.cursor_write::<CallEvmStorage>().map_err(db_err)?;
+        for (key, value) in storage {
+            cursor.upsert(key, &value).map_err(db_err)?;
+        }
+    }
+
+    // 4. Upsert bytecodes
+    {
+        let mut cursor = tx.cursor_write::<CallBytecodes>().map_err(db_err)?;
+        for (key, value) in bytecodes {
+            cursor.upsert(key, &value).map_err(db_err)?;
+        }
+    }
+
+    tx.commit().map_err(db_err)?;
+    Ok(())
+}
+
+/// Atomically replace the full EVM state in MDBX.
+///
+/// Deletes all existing entries in `CallEvmAccounts`, `CallEvmStorage`,
+/// and `CallBytecodes`, then writes the provided data in a single
+/// transaction. This avoids the per-table `fsync` overhead of calling
+/// `db_clear` + `db_batch_put` separately for each table.
+pub fn db_replace_full_state(
+    db: &DatabaseEnv,
+    accounts: Vec<(Vec<u8>, Vec<u8>)>,
+    storage: Vec<(Vec<u8>, Vec<u8>)>,
+    bytecodes: Vec<(Vec<u8>, Vec<u8>)>,
+) -> Result<(), StorageError> {
+    let tx = db.tx_mut().map_err(db_err)?;
+
+    // Clear accounts
+    {
+        let mut cursor = tx.cursor_write::<CallEvmAccounts>().map_err(db_err)?;
+        while cursor.first().map_err(db_err)?.is_some() {
+            cursor.delete_current().map_err(db_err)?;
+        }
+    }
+
+    // Clear storage
+    {
+        let mut cursor = tx.cursor_write::<CallEvmStorage>().map_err(db_err)?;
+        while cursor.first().map_err(db_err)?.is_some() {
+            cursor.delete_current().map_err(db_err)?;
+        }
+    }
+
+    // Clear bytecodes
+    {
+        let mut cursor = tx.cursor_write::<CallBytecodes>().map_err(db_err)?;
+        while cursor.first().map_err(db_err)?.is_some() {
+            cursor.delete_current().map_err(db_err)?;
+        }
+    }
+
+    // Write accounts
+    {
+        let mut cursor = tx.cursor_write::<CallEvmAccounts>().map_err(db_err)?;
+        for (key, value) in accounts {
+            cursor.upsert(key, &value).map_err(db_err)?;
+        }
+    }
+
+    // Write storage
+    {
+        let mut cursor = tx.cursor_write::<CallEvmStorage>().map_err(db_err)?;
+        for (key, value) in storage {
+            cursor.upsert(key, &value).map_err(db_err)?;
+        }
+    }
+
+    // Write bytecodes
+    {
+        let mut cursor = tx.cursor_write::<CallBytecodes>().map_err(db_err)?;
+        for (key, value) in bytecodes {
+            cursor.upsert(key, &value).map_err(db_err)?;
+        }
+    }
+
+    tx.commit().map_err(db_err)?;
+    Ok(())
+}
+
 // ── Convenience Methods for Each Table ────────────────────────────────
 
 /// Save prune state to the database.
