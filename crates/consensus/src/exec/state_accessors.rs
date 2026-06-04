@@ -347,13 +347,13 @@ pub fn read_allowance(
     spender: Address,
 ) -> u128 {
     let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
-    store.read_allowance(asset_id, owner, spender)
+    store.read_allowance(asset_id, owner, spender).unwrap_or(0)
 }
 
 /// Add to asset supply in EVM storage.
 pub fn add_asset_supply_evm(evm_state: &mut dyn ProtocolStorage, asset_id: u64, amount: u128) {
     let mut store = AssetStorage::new(ProtocolStateBackend(evm_state));
-    let current = store.read_meta(asset_id).supply;
+    let current = store.read_meta(asset_id).unwrap_or_default().supply;
     let new = current.saturating_add(amount);
     store.store_meta_u256(asset_id, b"supply", u128_to_u256(new));
 }
@@ -373,7 +373,7 @@ pub fn seed_asset(
 ) {
     use call_asset::AssetMeta;
     let mut store = AssetStorage::new(ProtocolStateBackend(evm_state));
-    store.write_meta(
+    let _ = store.write_meta(
         asset_id,
         &AssetMeta {
             symbol: symbol.to_string(),
@@ -383,6 +383,9 @@ pub fn seed_asset(
             max_supply,
             supply,
             status,
+            registered_at: call_primitives::U256::from(0),
+            evm_contract: Address::ZERO,
+            dominance: 0,
         },
     );
     // Compliance and registered_at defaults
@@ -393,25 +396,25 @@ pub fn seed_asset(
 /// Read an asset balance from EVM storage.
 pub fn read_balance(evm_state: &dyn ProtocolStorage, asset_id: u64, addr: Address) -> u128 {
     let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
-    store.read_balance(asset_id, addr)
+    store.read_balance(asset_id, addr).unwrap_or(0)
 }
 
 /// Read asset info from EVM storage.
 pub fn read_asset_symbol(evm_state: &dyn ProtocolStorage, asset_id: u64) -> String {
     let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
-    store.read_meta(asset_id).symbol
+    store.read_meta(asset_id).unwrap_or_default().symbol
 }
 
 /// Read asset issuer from EVM storage.
 pub fn read_asset_issuer(evm_state: &dyn ProtocolStorage, asset_id: u64) -> Address {
     let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
-    store.read_meta(asset_id).issuer
+    store.read_meta(asset_id).unwrap_or_default().issuer
 }
 
 /// Read asset status from EVM storage.
 pub fn read_asset_status(evm_state: &dyn ProtocolStorage, asset_id: u64) -> u8 {
     let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
-    store.read_meta(asset_id).status
+    store.read_meta(asset_id).unwrap_or_default().status
 }
 
 /// Seed bridge contract address for an asset in EVM storage.
@@ -730,25 +733,25 @@ pub fn finalize_pending_external_deposits_evm(
 /// Read asset name from EVM storage.
 pub fn read_asset_name(evm_state: &dyn ProtocolStorage, asset_id: u64) -> String {
     let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
-    store.read_meta(asset_id).name
+    store.read_meta(asset_id).unwrap_or_default().name
 }
 
 /// Read asset decimals from EVM storage.
 pub fn read_asset_decimals(evm_state: &dyn ProtocolStorage, asset_id: u64) -> u8 {
     let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
-    store.read_meta(asset_id).decimals
+    store.read_meta(asset_id).unwrap_or_default().decimals
 }
 
 /// Read asset supply from EVM storage.
 pub fn read_asset_supply(evm_state: &dyn ProtocolStorage, asset_id: u64) -> u128 {
     let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
-    store.read_meta(asset_id).supply
+    store.read_meta(asset_id).unwrap_or_default().supply
 }
 
 /// Read asset max supply from EVM storage.
 pub fn read_asset_max_supply(evm_state: &dyn ProtocolStorage, asset_id: u64) -> u128 {
     let mut store = AssetStorage::new(ProtocolStateRefBackend(evm_state));
-    store.read_meta(asset_id).max_supply
+    store.read_meta(asset_id).unwrap_or_default().max_supply
 }
 
 /// Read asset compliance policy from EVM storage.

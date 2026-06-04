@@ -1582,7 +1582,7 @@ impl GovernancePrecompile {
                 // CALL balance check
                 let call_balance = {
                     let mut asset_store = AssetStorage::new(sr);
-                    asset_store.read_balance(CALL_ASSET_ID, caller)
+                    asset_store.read_balance(CALL_ASSET_ID, caller).unwrap_or(0)
                 };
 
                 match proposal_type {

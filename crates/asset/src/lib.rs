@@ -51,7 +51,7 @@ impl std::fmt::Display for AssetError {
 impl std::error::Error for AssetError {}
 
 /// Asset metadata loaded from storage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct AssetMeta {
     pub symbol: String,
     pub name: String,
@@ -207,7 +207,7 @@ impl<B: StorageBackend> AssetStorage<B> {
         })
     }
 
-    pub(crate) fn write_meta(
+    pub fn write_meta(
         &mut self,
         asset_id: u64,
         meta: &AssetMeta,
