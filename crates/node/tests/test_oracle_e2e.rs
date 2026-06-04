@@ -72,15 +72,48 @@ fn test_oracle_price_submit_and_read() {
         provider.state().save_to_db(&node.state.db_env).unwrap();
     }
 
+    // Track asset 1 so oracle submissions are accepted
+    {
+        let mut provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        provider.state_mut().set_storage(
+            ORACLE_ADDRESS,
+            storage_slot(&[b"tracked_count"]),
+            alloy_primitives::U256::from(1u64),
+        );
+        provider.state_mut().set_storage(
+            ORACLE_ADDRESS,
+            storage_slot(&[b"tracked", &0u64.to_be_bytes()[..]]),
+            alloy_primitives::U256::from(1u64),
+        );
+        provider.state_mut().set_storage(
+            ORACLE_ADDRESS,
+            storage_slot(&[&1u64.to_be_bytes()[..], b"flag"]),
+            alloy_primitives::U256::from(1u64),
+        );
+        provider.state().save_to_db(&node.state.db_env).unwrap();
+    }
+
+    // Verify validator is registered before submission
+    {
+        let provider =
+            call_evm::provider::InMemoryStateProvider::from_db(&node.state.db_env).unwrap();
+        let validator_id = call_consensus::exec::state_accessors::read_validator_id_by_addr(
+            provider.state(),
+            validator_addr,
+        );
+        assert_ne!(validator_id, 0, "validator should be registered");
+    }
+
     let asset_id = 1u64;
-    let price1 = 50_000_000_000_000_000_000u128; // $50,000 with 18 decimals
+    let price1 = 50_000_000_000_000_000u128; // within MAX_PRICE (10^18)
 
     // Step 1: Submit first price
     let submit_data = IProtocolOracle::submitPriceCall {
         assetId: asset_id,
         price: price1,
         timestamp: 1_000_000,
-        blockNumber: 1,
+        blockNumber: 0,
     }
     .abi_encode();
 
@@ -95,10 +128,18 @@ fn test_oracle_price_submit_and_read() {
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(submit_data),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(submit_tx);
     let result = node.produce_block(1_000_000);
     assert!(result.is_some(), "block production failed");
+    let last_result = node.last_result.as_ref().unwrap();
+    assert_eq!(last_result.evm_tx_results.len(), 1);
+    assert!(
+        last_result.evm_tx_results[0].status,
+        "oracle submit should succeed"
+    );
 
     // Verify price, count, and TWAP after first submission
     {
@@ -131,12 +172,12 @@ fn test_oracle_price_submit_and_read() {
     }
 
     // Step 2: Submit second price to test TWAP averaging
-    let price2 = 60_000_000_000_000_000_000u128; // $60,000
+    let price2 = 60_000_000_000_000_000u128; // within MAX_PRICE
     let submit_data2 = IProtocolOracle::submitPriceCall {
         assetId: asset_id,
         price: price2,
         timestamp: 1_000_250,
-        blockNumber: 2,
+        blockNumber: 1,
     }
     .abi_encode();
 
@@ -151,6 +192,8 @@ fn test_oracle_price_submit_and_read() {
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(submit_data2),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(submit_tx2);
     node.produce_block(1_000_250);
@@ -228,7 +271,7 @@ fn test_oracle_non_validator_rejected() {
         assetId: 1,
         price: 1_000_000,
         timestamp: 1_000_000,
-        blockNumber: 1,
+        blockNumber: 0,
     }
     .abi_encode();
 
@@ -243,6 +286,8 @@ fn test_oracle_non_validator_rejected() {
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(submit_data),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(submit_tx);
     let result = node.produce_block(1_000_000);

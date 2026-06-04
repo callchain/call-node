@@ -25,8 +25,6 @@ use revm::{
     primitives::{hardfork::SpecId, Log, TxKind},
     Context, ExecuteEvm, InspectEvm, MainBuilder, MainContext,
 };
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// EVM execution error
 #[derive(Debug)]
@@ -75,27 +73,13 @@ pub struct EvmTransaction {
 pub struct EvmExecutor {
     pub chain_id: u64,
     pub spec_id: SpecId,
-    /// Reusable precompile set (cloned per transaction to avoid 9 Box
-    /// allocations on every tx).
-    precompiles: CallPrecompiles,
 }
 
 impl EvmExecutor {
     pub fn new(chain_id: u64) -> Self {
-        let precompiles = CallPrecompiles::new(SpecId::CANCUN)
-            .with_custom(ORACLE_ADDRESS, Rc::new(RefCell::new(OraclePrecompile)))
-            .with_custom(BRIDGE_ADDRESS, Rc::new(RefCell::new(BridgePrecompile)))
-            .with_custom(ASSET_ADDRESS, Rc::new(RefCell::new(AssetPrecompile)))
-            .with_custom(SHIELDED_ADDRESS, Rc::new(RefCell::new(ShieldedPrecompile)))
-            .with_custom(GOVERNANCE_ADDRESS, Rc::new(RefCell::new(GovernancePrecompile)))
-            .with_custom(VALIDATOR_ADDRESS, Rc::new(RefCell::new(ValidatorPrecompile)))
-            .with_custom(COMPLIANCE_ADDRESS, Rc::new(RefCell::new(CompliancePrecompile)))
-            .with_custom(SWITCH_ADDRESS, Rc::new(RefCell::new(SwitchPrecompile)))
-            .with_custom(AGENT_ADDRESS, Rc::new(RefCell::new(AgentPrecompile)));
         Self {
             chain_id,
             spec_id: SpecId::CANCUN,
-            precompiles,
         }
     }
 
@@ -156,8 +140,18 @@ impl EvmExecutor {
                 .with_db(db)
                 .modify_cfg_chained(|cfg| cfg.set_spec(self.spec_id));
 
-            // Build EVM with Callchain custom precompiles (cloned from cached set)
-            let mut evm = ctx.build_mainnet().with_precompiles(self.precompiles.clone());
+            // Build EVM with Callchain custom precompiles
+            let precompiles = CallPrecompiles::new(self.spec_id)
+                .with_custom(ORACLE_ADDRESS, Box::new(OraclePrecompile))
+                .with_custom(BRIDGE_ADDRESS, Box::new(BridgePrecompile))
+                .with_custom(ASSET_ADDRESS, Box::new(AssetPrecompile))
+                .with_custom(SHIELDED_ADDRESS, Box::new(ShieldedPrecompile))
+                .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
+                .with_custom(VALIDATOR_ADDRESS, Box::new(ValidatorPrecompile))
+                .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
+                .with_custom(SWITCH_ADDRESS, Box::new(SwitchPrecompile))
+                .with_custom(AGENT_ADDRESS, Box::new(AgentPrecompile));
+            let mut evm = ctx.build_mainnet().with_precompiles(precompiles);
 
             let mut block_env = revm::context::BlockEnv::default();
             block_env.number = U256::from(block_number);
@@ -258,9 +252,19 @@ impl EvmExecutor {
                 .with_db(db)
                 .modify_cfg_chained(|cfg| cfg.set_spec(self.spec_id));
 
+            let precompiles = CallPrecompiles::new(self.spec_id)
+                .with_custom(ORACLE_ADDRESS, Box::new(OraclePrecompile))
+                .with_custom(BRIDGE_ADDRESS, Box::new(BridgePrecompile))
+                .with_custom(ASSET_ADDRESS, Box::new(AssetPrecompile))
+                .with_custom(SHIELDED_ADDRESS, Box::new(ShieldedPrecompile))
+                .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
+                .with_custom(VALIDATOR_ADDRESS, Box::new(ValidatorPrecompile))
+                .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
+                .with_custom(SWITCH_ADDRESS, Box::new(SwitchPrecompile))
+                .with_custom(AGENT_ADDRESS, Box::new(AgentPrecompile));
             let mut evm = ctx
                 .build_mainnet_with_inspector(inspector)
-                .with_precompiles(self.precompiles.clone());
+                .with_precompiles(precompiles);
 
             let mut block_env = revm::context::BlockEnv::default();
             block_env.number = U256::from(block_number);
@@ -349,6 +353,7 @@ impl EvmExecutor {
         tx: EvmTransaction,
         cache_db: &mut revm::database::CacheDB<DB>,
         block_number: u64,
+        block_timestamp: u64,
         base_fee: u128,
     ) -> Result<(EvmExecutionResult, revm::state::EvmState), EvmError>
     where
@@ -390,10 +395,21 @@ impl EvmExecutor {
                 .with_db(cache_db)
                 .modify_cfg_chained(|cfg: &mut revm::context::CfgEnv| cfg.set_spec(self.spec_id));
 
-            let mut evm = ctx.build_mainnet().with_precompiles(self.precompiles.clone());
+            let precompiles = CallPrecompiles::new(self.spec_id)
+                .with_custom(ORACLE_ADDRESS, Box::new(OraclePrecompile))
+                .with_custom(BRIDGE_ADDRESS, Box::new(BridgePrecompile))
+                .with_custom(ASSET_ADDRESS, Box::new(AssetPrecompile))
+                .with_custom(SHIELDED_ADDRESS, Box::new(ShieldedPrecompile))
+                .with_custom(GOVERNANCE_ADDRESS, Box::new(GovernancePrecompile))
+                .with_custom(VALIDATOR_ADDRESS, Box::new(ValidatorPrecompile))
+                .with_custom(COMPLIANCE_ADDRESS, Box::new(CompliancePrecompile))
+                .with_custom(SWITCH_ADDRESS, Box::new(SwitchPrecompile))
+                .with_custom(AGENT_ADDRESS, Box::new(AgentPrecompile));
+            let mut evm = ctx.build_mainnet().with_precompiles(precompiles);
 
             let mut block_env = revm::context::BlockEnv::default();
             block_env.number = U256::from(block_number);
+            block_env.timestamp = U256::from(block_timestamp);
             block_env.basefee = base_fee as u64;
             evm.set_block(block_env);
 
@@ -1020,7 +1036,7 @@ mod tests {
             chain_id: 1,
         };
         let (result, revm_state) = executor
-            .execute_tx_cached(tx, &mut cache_db, 0, 0)
+            .execute_tx_cached(tx, &mut cache_db, 0, 0, 0)
             .expect("execute cached");
         assert!(result.success);
 

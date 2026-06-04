@@ -57,6 +57,7 @@ pub fn execute_block_transactions<SP>(
     evm_txs: &[Vec<u8>],
     provider: SP,
     block_number: u64,
+    block_timestamp: u64,
     base_fee: u128,
 ) -> Result<(BlockTxResult, revm::state::EvmState), EvmError>
 where
@@ -73,23 +74,14 @@ where
     let mut result = BlockTxResult::default();
     let mut accumulated_state = revm::state::EvmState::default();
 
-    // Pre-decode all transactions upfront so the execution loop works with
-    // structured data and avoids repeated RLP/JSON parsing + signature recovery.
-    let decoded_txs: Vec<(EvmTransaction, alloy_primitives::B256)> = evm_txs
-        .iter()
-        .filter_map(|raw| match decode_evm_tx(raw) {
-            Ok(tx) => {
-                let hash = keccak256(raw);
-                Some((tx, hash))
-            }
+    for raw_tx in evm_txs {
+        let tx = match decode_evm_tx(raw_tx) {
+            Ok(t) => t,
             Err(()) => {
                 tracing::warn!("block_executor: decode_evm_tx failed, skipping tx");
-                None
+                continue;
             }
-        })
-        .collect();
-
-    for (tx, tx_hash) in decoded_txs {
+        };
         let caller = tx.caller;
         let nonce = tx.nonce;
 
@@ -185,7 +177,7 @@ where
         let tx_gas_price = tx.gas_price;
         let eff_gas_price = effective_gas_price(&tx, base_fee);
 
-        match executor.execute_tx_cached(tx, &mut cache_db, block_number, base_fee) {
+        match executor.execute_tx_cached(tx, &mut cache_db, block_number, block_timestamp, base_fee) {
             Ok((exec_result, tx_delta)) => {
                 tracing::info!(
                     ?caller,
@@ -326,8 +318,9 @@ where
                     data: log.data.data.to_vec(),
                 }));
 
+                let tx_hash = keccak256(raw_tx);
                 result.evm_tx_results.push(BlockTxEntry {
-                    tx_hash: tx_hash,
+                    tx_hash,
                     gas_used: exec_result.gas_used,
                     status: exec_result.success,
                     caller,
@@ -595,7 +588,7 @@ mod tests {
         };
 
         let (result, state) =
-            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0).unwrap();
+            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0, 0).unwrap();
 
         assert_eq!(result.evm_tx_count, 1);
         assert!(result.evm_tx_results[0].status);
@@ -656,7 +649,7 @@ mod tests {
         };
 
         let (result, state) =
-            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0).unwrap();
+            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0, 0).unwrap();
 
         assert_eq!(result.evm_tx_count, 1);
         assert!(!result.evm_tx_results[0].status); // reverted / halted
@@ -708,7 +701,7 @@ mod tests {
         };
 
         let (result, state) =
-            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0).unwrap();
+            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0, 0).unwrap();
 
         assert_eq!(result.evm_tx_count, 1);
         assert!(result.evm_tx_results[0].status);
@@ -757,7 +750,7 @@ mod tests {
         };
 
         let (result, _state) =
-            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0).unwrap();
+            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0, 0).unwrap();
 
         // Tx should be skipped because protocol balance is insufficient.
         assert_eq!(result.evm_tx_count, 0);
@@ -804,6 +797,7 @@ mod tests {
             &[json_tx(&tx1), json_tx(&tx2)],
             provider,
             1,
+            0,
             0,
         )
         .unwrap();
@@ -862,7 +856,7 @@ mod tests {
         };
 
         let (result, _state) =
-            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0).unwrap();
+            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0, 0).unwrap();
 
         let logs = &result.evm_tx_results[0].logs;
         let bridge_idx = logs.iter().position(|l| {
@@ -912,7 +906,7 @@ mod tests {
         };
 
         let (result, state) =
-            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0).unwrap();
+            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0, 0).unwrap();
 
         assert_eq!(result.evm_tx_count, 1);
 
@@ -975,7 +969,7 @@ mod tests {
 
         // execute_block_transactions now accepts any EvmStateProvider
         let (result, state) =
-            execute_block_transactions(&[json_tx(&tx)], lazy, 1, 0).unwrap();
+            execute_block_transactions(&[json_tx(&tx)], lazy, 1, 0, 0).unwrap();
 
         assert_eq!(result.evm_tx_count, 1);
         assert!(result.evm_tx_results[0].status);
@@ -1021,6 +1015,7 @@ mod tests {
             provider,
             1,
             0,
+            0,
         )
         .unwrap();
 
@@ -1052,7 +1047,7 @@ mod tests {
         };
 
         let (result, _state) =
-            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0).unwrap();
+            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0, 0).unwrap();
 
         assert_eq!(result.evm_tx_count, 0, "wrong nonce should be skipped");
     }
@@ -1097,6 +1092,7 @@ mod tests {
             provider,
             1,
             0,
+            0,
         )
         .unwrap();
 
@@ -1139,7 +1135,7 @@ mod tests {
             })
             .collect();
 
-        let (result, _state) = execute_block_transactions(&txs, provider, 1, 0).unwrap();
+        let (result, _state) = execute_block_transactions(&txs, provider, 1, 0, 0).unwrap();
 
         assert_eq!(result.evm_tx_count, 5);
         assert_eq!(result.evm_gas_used, 105_000);

@@ -42,6 +42,8 @@ fn make_evm_tx(nonce: u64) -> call_evm::EvmTransaction {
         value: call_primitives::U256::from(100),
         data: call_evm::Bytes::default(),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     }
 }
 
@@ -55,6 +57,8 @@ fn make_agent_evm_tx(nonce: u64, gas_price: u64, calldata: Vec<u8>) -> call_evm:
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(calldata),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     }
 }
 
@@ -1549,7 +1553,7 @@ async fn test_agent_register_in_block() {
     let register_call = call_agent::precompile::IProtocolAgent::registerAgentCall {
         name: "TestAgent".into(),
         url: "http://test.com".into(),
-        pubkeyHash: [0xBBu8; 32].into(),
+        agentAddress: test_addr(0xBB),
     };
     let tx = make_agent_evm_tx(0, 10, register_call.abi_encode());
     {
@@ -1659,7 +1663,7 @@ async fn test_agent_grant_and_pay_in_block() {
         call_agent::precompile::IProtocolAgent::registerAgentCall {
             name: "PayAgent".into(),
             url: "http://pay.com".into(),
-            pubkeyHash: [0xCCu8; 32].into(),
+            agentAddress: *test_sender(),
         }
         .abi_encode(),
     );
@@ -1677,7 +1681,6 @@ async fn test_agent_grant_and_pay_in_block() {
         2,
         10,
         call_agent::precompile::IProtocolAgent::payCall {
-            agentId: 0,
             assetId: call_agent::CALL_ASSET_ID,
             to: recipient,
             amount: 1_000,

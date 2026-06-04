@@ -28,6 +28,8 @@ fn make_evm_tx(sender: Address, nonce: u64, to: Address, amount: u128) -> EvmTra
         value: call_primitives::U256::from(amount),
         data: call_evm::Bytes::default(),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     }
 }
 

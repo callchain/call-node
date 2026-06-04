@@ -120,6 +120,8 @@ fn test_governance_proposal_full_lifecycle() {
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(submit_data),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(submit_tx);
     let result = node.produce_block(1_000_000);
@@ -157,6 +159,8 @@ fn test_governance_proposal_full_lifecycle() {
         value: call_primitives::U256::ZERO,
         data: gov_calldata(&[0xb0, 0x40, 0xd1, 0x66], &vote_args),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(vote_tx);
     node.produce_block(1_000_020);
@@ -175,6 +179,8 @@ fn test_governance_proposal_full_lifecycle() {
         value: call_primitives::U256::ZERO,
         data: gov_calldata(&[0x92, 0x6c, 0x46, 0xb2], &queue_args),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(queue_tx);
     node.produce_block(1_000_021);

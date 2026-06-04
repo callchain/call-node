@@ -633,57 +633,6 @@ pub fn hashed_post_state_from_bundle_state(
     reth_trie::HashedPostState { accounts, storages }
 }
 
-/// Build a [`HashedPostState`] from a revm [`EvmState`] delta plus system
-/// settlement changes.
-///
-/// This is used in block execution to compute the incremental state root:
-/// the `revm_delta` covers EVM transaction changes, while `oracle_addr`
-/// and optional `validator_addr` cover post-EVM settlement.
-pub fn post_state_with_settlement(
-    revm_delta: &revm::state::EvmState,
-    provider: &InMemoryStateProvider,
-    oracle_addr: Address,
-    oracle_slot: U256,
-    validator_addr: Option<(Address, U256)>,
-) -> reth_trie::HashedPostState {
-    use reth_trie::HashedStorage;
-    use alloy_primitives::map::B256Map;
-
-    let mut post_state = hashed_post_state_from_revm_state(revm_delta);
-
-    // Mark oracle address as changed (settlement modified its storage)
-    let oracle_hashed = keccak256(oracle_addr);
-    if !post_state.accounts.contains_key(&oracle_hashed) {
-        if let Some(acc) = provider.get_account(&oracle_addr) {
-            post_state.accounts.insert(oracle_hashed, Some(to_reth_account(acc)));
-        }
-    }
-    let oracle_slot_hashed = keccak256(oracle_slot.to_be_bytes::<32>());
-    let oracle_storage = post_state
-        .storages
-        .entry(oracle_hashed)
-        .or_insert_with(|| HashedStorage::from_iter(false, B256Map::default()));
-    oracle_storage.storage.insert(oracle_slot_hashed, U256::ZERO);
-
-    // Mark validator address as changed if reward was distributed
-    if let Some((addr, slot)) = validator_addr {
-        let validator_hashed = keccak256(addr);
-        if !post_state.accounts.contains_key(&validator_hashed) {
-            if let Some(acc) = provider.get_account(&addr) {
-                post_state.accounts.insert(validator_hashed, Some(to_reth_account(acc)));
-            }
-        }
-        let slot_hashed = keccak256(slot.to_be_bytes::<32>());
-        let validator_storage = post_state
-            .storages
-            .entry(validator_hashed)
-            .or_insert_with(|| HashedStorage::from_iter(false, B256Map::default()));
-        validator_storage.storage.insert(slot_hashed, U256::ZERO);
-    }
-
-    post_state
-}
-
 // ── Conversion helpers ────────────────────────────────────────────────
 
 /// Convert an [`EvmAccount`] to a reth [`Account`].

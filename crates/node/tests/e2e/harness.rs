@@ -605,6 +605,8 @@ impl SharedTxCorpus {
             value: call_primitives::U256::from(amount),
             data: call_evm::Bytes::default(),
             chain_id: 1,
+            max_priority_fee: None,
+            tx_type: 0,
         };
         self.next_nonce += 1;
         self.transactions.push(tx.clone());

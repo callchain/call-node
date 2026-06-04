@@ -1197,7 +1197,7 @@ mod tests {
             .grant_balance(&mut asset_store, 0, CALL_ASSET_ID, 5_000, caller)
             .unwrap();
         assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 5_000);
-        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller), 5_000);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller).unwrap(), 5_000);
 
         // Pay (agent only)
         agent_store
@@ -1211,14 +1211,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 4_000);
-        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, recipient), 1_000);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, recipient).unwrap(), 1_000);
 
         // Revoke balance (owner only)
         agent_store
             .revoke_balance(&mut asset_store, 0, CALL_ASSET_ID, caller)
             .unwrap();
         assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 0);
-        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller), 9_000);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller).unwrap(), 9_000);
     }
 
     #[test]
@@ -1250,8 +1250,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(agent_store.read_agent_balance(0, CALL_ASSET_ID), 3_700);
-        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, r1), 500);
-        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, r2), 800);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, r1).unwrap(), 500);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, r2).unwrap(), 800);
     }
 
     #[test]
@@ -1526,8 +1526,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, owner), 9_200);
-        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, recipient), 800);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, owner).unwrap(), 9_200);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, recipient).unwrap(), 800);
         assert_eq!(agent_store.read_session_spent(0), 800);
     }
 

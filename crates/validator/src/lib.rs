@@ -740,7 +740,7 @@ mod tests {
         assert_eq!(validator_store.read_active_validator_count(), 0);
         assert_eq!(validator_store.read_validator_by_index(1), Address::ZERO);
         // Balance restored
-        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller), 10_000_000);
+        assert_eq!(asset_store.read_balance(CALL_ASSET_ID, caller).unwrap(), 10_000_000);
     }
 
     #[test]

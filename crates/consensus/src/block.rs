@@ -5,7 +5,6 @@
 use call_crypto::keccak256;
 use call_primitives::{Address, Balance, BlockHash, Hash, ProtocolVersion, TxHash};
 use call_protocol::gas::FeeParams;
-use call_precompile::{ORACLE_ADDRESS, VALIDATOR_ADDRESS};
 use serde::{Deserialize, Serialize};
 
 use crate::exec::state_accessors;
@@ -198,6 +197,7 @@ impl Block {
                 &self.evm_txs,
                 lazy,
                 current_block_height,
+                self.header.timestamp_millis,
                 fee_params.base_fee,
             )
             .map_err(|e| ConsensusError::InvalidBlock(format!("evm execution failed: {e}")))?
@@ -207,6 +207,7 @@ impl Block {
                 &self.evm_txs,
                 provider_for_exec,
                 current_block_height,
+                self.header.timestamp_millis,
                 fee_params.base_fee,
             )
             .map_err(|e| ConsensusError::InvalidBlock(format!("evm execution failed: {e}")))?
@@ -251,46 +252,21 @@ impl Block {
         // This is applied before state root computation so the state root
         // captures all consensus-driven state changes.
         let validator_share = total_fees * fee_params.validator_fee_share_bps as u128 / 10_000;
-        let mut validator_rewarded = false;
-        let proposer_addr = if validator_share > 0 {
-            state_accessors::read_validator_addr(provider.state(), self.header.proposer as u64)
-        } else {
-            call_primitives::Address::ZERO
-        };
-        if validator_share > 0 && proposer_addr != call_primitives::Address::ZERO {
-            state_accessors::distribute_reward_evm(
-                provider.state_mut(),
-                proposer_addr,
-                validator_share,
-            );
-            result.total_validator_reward = validator_share;
-            validator_rewarded = true;
+        if validator_share > 0 {
+            let proposer_addr =
+                state_accessors::read_validator_addr(provider.state(), self.header.proposer as u64);
+            if proposer_addr != call_primitives::Address::ZERO {
+                state_accessors::distribute_reward_evm(
+                    provider.state_mut(),
+                    proposer_addr,
+                    validator_share,
+                );
+                result.total_validator_reward = validator_share;
+            }
         }
 
-        // Compute state root and collect trie updates for persistence.
-        // When MDBX is available, use incremental computation (O(changed) instead of O(n))
-        // by loading persisted trie nodes and only recomputing changed paths.
-        let (root, updates) = if let Some(ref db) = db_env {
-            let oracle_slot = state_accessors::slot_oracle_reward_pool();
-            let validator_slot = if validator_rewarded {
-                Some(state_accessors::slot_validator_stake(proposer_addr))
-            } else {
-                None
-            };
-            let post_state = call_evm::trie::post_state_with_settlement(
-                &revm_delta,
-                provider.state(),
-                ORACLE_ADDRESS,
-                oracle_slot,
-                validator_slot.map(|slot| (VALIDATOR_ADDRESS, slot)),
-            );
-            call_evm::trie::compute_state_root_incremental(db, provider.state(), &post_state)
-                .map_err(|e| {
-                    ConsensusError::InvalidBlock(format!("state root computation failed: {e}"))
-                })?
-        } else {
-            provider.state().compute_state_root_with_updates()
-        };
+        // Compute state root and collect trie updates for persistence
+        let (root, updates) = provider.state().compute_state_root_with_updates();
         result.state_root = root;
 
         // Persist trie nodes to MDBX for eth_getProof

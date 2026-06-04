@@ -73,7 +73,7 @@ fn test_submit_proposal_success() {
         assert_eq!(gov.read_proposal_proposer(id), proposer);
 
         // Deposit deducted
-        let balance = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer);
+        let balance = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer).unwrap();
         assert_eq!(balance, PROPOSAL_DEPOSIT * 2 - PROPOSAL_DEPOSIT);
     });
 }
@@ -636,7 +636,7 @@ fn test_execute_after_timelock() {
         assert_eq!(gov.read_proposal_status(id), 3); // Executed
 
         // Deposit refunded
-        let balance = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer);
+        let balance = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer).unwrap();
         assert_eq!(
             balance,
             PROPOSAL_DEPOSIT * 2 - PROPOSAL_DEPOSIT + PROPOSAL_DEPOSIT
@@ -675,7 +675,7 @@ fn test_execute_deposit_refunded() {
         gov.execute(&mut asset, id, 2, proposer).unwrap();
 
         // Deposit returned
-        let balance = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer);
+        let balance = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer).unwrap();
         assert_eq!(balance, PROPOSAL_DEPOSIT * 2);
     });
 }
@@ -755,14 +755,13 @@ fn test_treasury_spend_transfers_from_treasury() {
         gov.execute(&mut asset, id, 2, proposer).unwrap();
 
         // Recipient should receive exactly the spend amount (not more)
-        let recipient_balance = asset.read_balance(call_protocol::CALL_ASSET_ID, recipient);
+        let recipient_balance = asset.read_balance(call_protocol::CALL_ASSET_ID, recipient).unwrap();
         assert_eq!(recipient_balance, amount);
 
         // Treasury should be debited
-        let treasury_balance = asset.read_balance(
-            call_protocol::CALL_ASSET_ID,
-            crate::precompile::TREASURY_ADDRESS,
-        );
+        let treasury_balance = asset
+            .read_balance(call_protocol::CALL_ASSET_ID, crate::precompile::TREASURY_ADDRESS)
+            .unwrap();
         assert_eq!(treasury_balance, 400_000);
     });
 }
@@ -1214,13 +1213,13 @@ fn test_cancel_proposal_by_proposer_during_review() {
             .unwrap();
 
         assert_eq!(gov.read_proposal_status(id), 0); // Pending
-        let balance_before = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer);
+        let balance_before = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer).unwrap();
 
         // Proposer cancels during review period
         gov.cancel_proposal(&mut asset, id, proposer).unwrap();
 
         assert_eq!(gov.read_proposal_status(id), 4); // Defeated
-        let balance_after = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer);
+        let balance_after = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer).unwrap();
         assert_eq!(balance_after, balance_before + PROPOSAL_DEPOSIT); // Deposit refunded
     });
 }
@@ -1583,13 +1582,13 @@ fn test_expired_proposal_refunds_deposit() {
         let mut asset = AssetStorage::new(StorageRef::new(&mut *storage));
         let proposer = test_addr(1);
 
-        let balance_before = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer);
+        let balance_before = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer).unwrap();
         let result = gov.execute(&mut asset, id, 1000, proposer);
         assert!(result.is_err(), "execute past timeout should fail");
         assert_eq!(gov.read_proposal_status(id), 6); // Expired
 
         // Deposit should be refunded
-        let balance_after = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer);
+        let balance_after = asset.read_balance(call_protocol::CALL_ASSET_ID, proposer).unwrap();
         assert_eq!(balance_after, balance_before + PROPOSAL_DEPOSIT);
     }
 }

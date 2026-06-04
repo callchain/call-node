@@ -62,7 +62,7 @@ fn test_agent_lifecycle_in_block() {
     let register_data = IProtocolAgent::registerAgentCall {
         name: "TestAgent".into(),
         url: "https://agent.example.com".into(),
-        pubkeyHash: [0xAAu8; 32].into(),
+        agentAddress: owner,
     }
     .abi_encode();
 
@@ -77,6 +77,8 @@ fn test_agent_lifecycle_in_block() {
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(register_data),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(register_tx);
     let result = node.produce_block(1_000_000);
@@ -113,6 +115,8 @@ fn test_agent_lifecycle_in_block() {
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(grant_data),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(grant_tx);
     node.produce_block(1_000_001);
@@ -134,7 +138,6 @@ fn test_agent_lifecycle_in_block() {
     // Step 3: Agent pays recipient (within default per_tx_limit of 1_000)
     let pay_amount = 1_000u128;
     let pay_data = IProtocolAgent::payCall {
-        agentId: 0,
         assetId: call_protocol::CALL_ASSET_ID,
         to: recipient,
         amount: pay_amount,
@@ -152,6 +155,8 @@ fn test_agent_lifecycle_in_block() {
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(pay_data),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(pay_tx);
     node.produce_block(1_000_002);
@@ -188,7 +193,6 @@ fn test_agent_lifecycle_in_block() {
     let r1 = test_addr(0x44);
     let r2 = test_addr(0x55);
     let batch_data = IProtocolAgent::batchPayCall {
-        agentId: 0,
         assetId: call_protocol::CALL_ASSET_ID,
         to: vec![r1, r2],
         amounts: vec![500, 500],
@@ -206,6 +210,8 @@ fn test_agent_lifecycle_in_block() {
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(batch_data),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(batch_tx);
     node.produce_block(1_000_003);
@@ -259,6 +265,8 @@ fn test_agent_lifecycle_in_block() {
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(revoke_data),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(revoke_tx);
     node.produce_block(1_000_004);
@@ -291,6 +299,8 @@ fn test_agent_lifecycle_in_block() {
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(revoke_agent_data),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(revoke_agent_tx);
     node.produce_block(1_000_005);
@@ -365,7 +375,7 @@ fn test_agent_non_owner_rejected() {
     let register_data = IProtocolAgent::registerAgentCall {
         name: "Agent".into(),
         url: "url".into(),
-        pubkeyHash: [0xBBu8; 32].into(),
+        agentAddress: owner,
     }
     .abi_encode();
     let register_tx = call_evm::EvmTransaction {
@@ -379,6 +389,8 @@ fn test_agent_non_owner_rejected() {
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(register_data),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(register_tx);
     node.produce_block(1_000_000);
@@ -401,6 +413,8 @@ fn test_agent_non_owner_rejected() {
         value: call_primitives::U256::ZERO,
         data: call_evm::Bytes::from(grant_data),
         chain_id: 1,
+        max_priority_fee: None,
+        tx_type: 0,
     };
     node.insert_evm_tx(grant_tx);
     node.produce_block(1_000_001);

@@ -417,7 +417,7 @@ impl LightClient {
             }
 
             // Verify viewing key can decrypt this note
-            if !viewing_key.can_decrypt(note.rcm()) {
+            if note.recipient_ivk() != &viewing_key.incoming_view_key {
                 continue; // Skip notes we can't decrypt
             }
 
