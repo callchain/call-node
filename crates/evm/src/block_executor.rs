@@ -73,14 +73,23 @@ where
     let mut result = BlockTxResult::default();
     let mut accumulated_state = revm::state::EvmState::default();
 
-    for raw_tx in evm_txs {
-        let tx = match decode_evm_tx(raw_tx) {
-            Ok(t) => t,
+    // Pre-decode all transactions upfront so the execution loop works with
+    // structured data and avoids repeated RLP/JSON parsing + signature recovery.
+    let decoded_txs: Vec<(EvmTransaction, alloy_primitives::B256)> = evm_txs
+        .iter()
+        .filter_map(|raw| match decode_evm_tx(raw) {
+            Ok(tx) => {
+                let hash = keccak256(raw);
+                Some((tx, hash))
+            }
             Err(()) => {
                 tracing::warn!("block_executor: decode_evm_tx failed, skipping tx");
-                continue;
+                None
             }
-        };
+        })
+        .collect();
+
+    for (tx, tx_hash) in decoded_txs {
         let caller = tx.caller;
         let nonce = tx.nonce;
 
@@ -317,9 +326,8 @@ where
                     data: log.data.data.to_vec(),
                 }));
 
-                let tx_hash = keccak256(raw_tx);
                 result.evm_tx_results.push(BlockTxEntry {
-                    tx_hash,
+                    tx_hash: tx_hash,
                     gas_used: exec_result.gas_used,
                     status: exec_result.success,
                     caller,
