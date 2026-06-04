@@ -984,4 +984,161 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn test_duplicate_nonce_skipped() {
+        let mut provider = InMemoryStateProvider::new();
+        let caller = test_addr(1);
+        let recipient = test_addr(2);
+
+        provider.set_balance(caller, U256::from(1_000_000));
+        provider.create_account(caller);
+        provider.create_account(recipient);
+
+        let tx = EvmTransaction {
+            caller,
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
+            to: Some(recipient),
+            value: U256::from(100),
+            data: alloy_primitives::Bytes::default(),
+            chain_id: 1,
+        };
+
+        let (result, _state) = execute_block_transactions(
+            &[json_tx(&tx), json_tx(&tx)],
+            provider,
+            1,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(result.evm_tx_count, 1, "duplicate nonce should be skipped");
+        assert_eq!(result.evm_gas_used, 21_000);
+    }
+
+    #[test]
+    fn test_wrong_nonce_skipped() {
+        let mut provider = InMemoryStateProvider::new();
+        let caller = test_addr(1);
+        let recipient = test_addr(2);
+
+        provider.set_balance(caller, U256::from(1_000_000));
+        provider.create_account(caller);
+        provider.create_account(recipient);
+
+        let tx = EvmTransaction {
+            caller,
+            nonce: 5, // wrong: expected is 0
+            gas_limit: 21_000,
+            gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
+            to: Some(recipient),
+            value: U256::from(100),
+            data: alloy_primitives::Bytes::default(),
+            chain_id: 1,
+        };
+
+        let (result, _state) =
+            execute_block_transactions(&[json_tx(&tx)], provider, 1, 0).unwrap();
+
+        assert_eq!(result.evm_tx_count, 0, "wrong nonce should be skipped");
+    }
+
+    #[test]
+    fn test_nonce_increments_across_txs() {
+        let mut provider = InMemoryStateProvider::new();
+        let caller = test_addr(1);
+        let recipient = test_addr(2);
+
+        provider.set_balance(caller, U256::from(1_000_000));
+        provider.create_account(caller);
+        provider.create_account(recipient);
+
+        let tx1 = EvmTransaction {
+            caller,
+            nonce: 0,
+            gas_limit: 21_000,
+            gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
+            to: Some(recipient),
+            value: U256::from(50),
+            data: alloy_primitives::Bytes::default(),
+            chain_id: 1,
+        };
+        let tx2 = EvmTransaction {
+            caller,
+            nonce: 1,
+            gas_limit: 21_000,
+            gas_price: 10,
+            max_priority_fee: None,
+            tx_type: 0,
+            to: Some(recipient),
+            value: U256::from(60),
+            data: alloy_primitives::Bytes::default(),
+            chain_id: 1,
+        };
+
+        let (result, state) = execute_block_transactions(
+            &[json_tx(&tx1), json_tx(&tx2)],
+            provider,
+            1,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(result.evm_tx_count, 2, "both nonces should be valid");
+        assert_eq!(result.evm_gas_used, 42_000);
+
+        // Caller final balance: 1_000_000 - 50 - 210_000 - 60 - 210_000 = 579_890
+        let caller_acc = state.get(&caller).expect("caller in state");
+        assert_eq!(caller_acc.info.balance, U256::from(579_890));
+
+        // Recipient should have 50 + 60 = 110
+        let recipient_acc = state.get(&recipient).expect("recipient in state");
+        assert_eq!(recipient_acc.info.balance, U256::from(110));
+    }
+
+    #[test]
+    fn test_block_gas_accumulation() {
+        let mut provider = InMemoryStateProvider::new();
+        let caller = test_addr(1);
+        let recipient = test_addr(2);
+
+        provider.set_balance(caller, U256::from(10_000_000));
+        provider.create_account(caller);
+        provider.create_account(recipient);
+
+        let txs: Vec<_> = (0..5)
+            .map(|i| {
+                json_tx(&EvmTransaction {
+                    caller,
+                    nonce: i as u64,
+                    gas_limit: 21_000,
+                    gas_price: 10,
+                    max_priority_fee: None,
+                    tx_type: 0,
+                    to: Some(recipient),
+                    value: U256::from(10),
+                    data: alloy_primitives::Bytes::default(),
+                    chain_id: 1,
+                })
+            })
+            .collect();
+
+        let (result, _state) = execute_block_transactions(&txs, provider, 1, 0).unwrap();
+
+        assert_eq!(result.evm_tx_count, 5);
+        assert_eq!(result.evm_gas_used, 105_000);
+        assert_eq!(result.evm_tx_results.len(), 5);
+        for entry in &result.evm_tx_results {
+            assert!(entry.status);
+            assert_eq!(entry.gas_used, 21_000);
+        }
+    }
 }
