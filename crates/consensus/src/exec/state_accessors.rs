@@ -48,7 +48,7 @@ fn slot_validator_addr(index: u64) -> U256 {
     storage_slot(&[b"validators"]) + U256::from(index)
 }
 
-fn slot_validator_stake(addr: Address) -> U256 {
+pub fn slot_validator_stake(addr: Address) -> U256 {
     storage_slot(&[addr.as_slice(), b"stake"])
 }
 
@@ -1331,7 +1331,7 @@ pub fn read_compliance_status(evm_state: &dyn ProtocolStorage, addr: Address, po
 
 // ── Oracle reward pool (stored in EVM storage) ────────────────────────
 
-fn slot_oracle_reward_pool() -> U256 {
+pub fn slot_oracle_reward_pool() -> U256 {
     storage_slot(&[b"oracle_reward_pool"])
 }
 
