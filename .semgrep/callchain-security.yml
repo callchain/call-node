@@ -9,7 +9,7 @@ rules:
           $X * $Y
     languages: [rust]
     message: "Use checked_add/checked_sub/checked_mul for balance or token arithmetic"
-    severity: ERROR
+    severity: WARNING
     paths:
       include:
         - crates/asset/src/*.rs

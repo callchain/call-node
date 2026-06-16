@@ -18,6 +18,7 @@ ignore = [
     "RUSTSEC-2026-0104",  # x509-parser CRL parsing panic
     "RUSTSEC-2023-0089",  # atomic-polyfill unmaintained (transitive via ark-ec)
     "RUSTSEC-2026-0119",  # hickory-proto O(n²) name compression (needs hickory-resolver >=0.26)
+    "RUSTSEC-2026-0173",  # proc-macro-error2 unmaintained (transitive via alloy-sol-macro)
 ]
 
 [bans]
