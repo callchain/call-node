@@ -3,7 +3,7 @@
 A high-performance Layer 1 blockchain node with unified EVM execution and native protocol precompiles.
 
 [![CI](https://github.com/callchain/call-node/actions/workflows/ci.yml/badge.svg)](https://github.com/callchain/call-node/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_3.0-blue.svg)](LICENSE)
 
 ## Quick Start
 
@@ -194,4 +194,4 @@ See [`docs/`](docs/) for full documentation including architecture specs, develo
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+GNU Affero General Public License v3.0 — see [LICENSE](LICENSE) for details.
