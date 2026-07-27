@@ -30,6 +30,7 @@ The documents below cover protocol design, operational guides, API references, a
 | Document | What you'll learn |
 |----------|-----------------|
 | [`quickstart.md`](quickstart.md) | Zero to first transaction in 5 minutes (Docker or source) |
+| [`cli.md`](cli.md) | `calld` CLI reference: arguments, wallet commands, RPC quick reference |
 | [`faq.md`](faq.md) | Frequently asked questions: hardware, sync, gas, staking, bridge |
 
 ## How To Use
@@ -47,6 +48,7 @@ The documents below cover protocol design, operational guides, API references, a
 
 | Document | Description |
 |----------|-------------|
+| [`architecture.md`](architecture.md) | High-level architecture overview and workspace crate map |
 | [`spec.md`](spec.md) | Protocol specification: consensus, execution, storage, networking |
 | [`protocol.md`](protocol.md) | Protocol payment layer: balances, fees, replay protection, compliance |
 | [`consensus.md`](consensus.md) | Simplex BFT consensus, block production, fork management, slashing |
@@ -121,11 +123,10 @@ The documents below cover protocol design, operational guides, API references, a
 
 | Document | Description |
 |----------|-------------|
-| [`future.md`](future.md) | Roadmap and planned features |
+| [`roadmap.md`](roadmap.md) | Roadmap: blockers, deferred work, optimization priorities |
 | [`vitalik-zk-payment.md`](vitalik-zk-payment.md) | Vitalik's ZK payment design analysis |
 | [`seismic.md`](seismic.md) | Seismic / encrypted memory research |
 | [`upgrade.md`](upgrade.md) | Protocol upgrade mechanism |
-| [`unready.md`](unready.md) | Remaining blockers before mainnet / testnet launch |
 | [`genesis.md`](genesis.md) | Genesis configuration requirements and creation guide |
 | [`rfcs/threshold-signing.md`](rfcs/threshold-signing.md) | Threshold signature scheme for validators (RFC) |
 
@@ -141,4 +142,4 @@ Operational procedures for incident response:
 
 ---
 
-**Last updated**: 2026-05-22
+**Last updated**: 2026-07-27
